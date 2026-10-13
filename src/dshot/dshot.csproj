@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>dshot</AssemblyName>
+    <RootNamespace>dshot</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <PublishTrimmed>false</PublishTrimmed>
+    <!-- Run on the newest installed Windows Desktop Runtime (8, 9, 10...), so the exe needs no bundled .NET. -->
+    <RollForward>LatestMajor</RollForward>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- WinForms is only used via aliases (tray icon, screen bounds); its implicit global usings clash with WPF types. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+</Project>

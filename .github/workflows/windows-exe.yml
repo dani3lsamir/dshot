@@ -1,0 +1,57 @@
+name: Build dshot.exe
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Create a GitHub prerelease with this tag (e.g. v0.1.0). Leave empty to only build.'
+        required: false
+        default: ''
+  push:
+    branches: [main, master]
+    tags: ['v*']
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore and build
+        shell: pwsh
+        run: |
+          dotnet restore src/dshot/dshot.csproj
+          dotnet build src/dshot/dshot.csproj -c Release --no-restore
+      - name: Publish x64 portable application
+        shell: pwsh
+        run: |
+          dotnet publish src/dshot/dshot.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:DebugType=none -o release
+          if (-not (Test-Path release/dshot.exe)) { throw 'dshot.exe not found after publish' }
+      - name: Upload executable and supporting files
+        uses: actions/upload-artifact@v4
+        with:
+          name: dshot-Windows-x64
+          path: release/**
+          if-no-files-found: error
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          $notes = @"
+          Test build of dshot for Windows 10/11 x64 (single portable exe, ~25 MB).
+
+          Requires the Microsoft Windows Desktop Runtime 8 or newer (x64). If it is missing, Windows shows a download link on first start.
+
+          - The exe is unsigned, so Windows SmartScreen may warn: choose More info -> Run anyway.
+          - Press Ctrl+Alt+S (or double-click the tray icon) to capture. Primary monitor only.
+          - OCR needs the English/Spanish Windows language packs installed.
+          "@
+          gh release create "$env:TAG" release/dshot.exe --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "dshot $env:TAG" --prerelease --notes $notes
