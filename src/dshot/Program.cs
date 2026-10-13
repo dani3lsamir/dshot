@@ -20,19 +20,23 @@ internal sealed class DshotApp : System.Windows.Application
     private const uint KeyPrintScreen = 0x2C; // VK_SNAPSHOT
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunEntry = "dshot";
+    private const string CaptureRequestEvent = "Local\\dshotCaptureRequest";
 
     private readonly System.Threading.Mutex _mutex;
     private readonly bool _firstInstance;
+    private readonly EventWaitHandle _captureRequest;
+    private RegisteredWaitHandle? _captureRequestWait;
     private HwndSource? _hotkeyWindow;
     private Forms.NotifyIcon? _tray;
     private OverlayWindow? _overlay;
     private bool _hotkeyRegistered;
     private bool _printScreenRegistered;
 
-    private DshotApp(System.Threading.Mutex mutex, bool firstInstance)
+    private DshotApp(System.Threading.Mutex mutex, bool firstInstance, EventWaitHandle captureRequest)
     {
         _mutex = mutex;
         _firstInstance = firstInstance;
+        _captureRequest = captureRequest;
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
     }
 
@@ -42,14 +46,23 @@ internal sealed class DshotApp : System.Windows.Application
         var mutex = new System.Threading.Mutex(true, "Local\\dshotSingleInstance", out bool first);
         if (!first)
         {
-            MessageBox.Show("dshot ya está abierto en la bandeja del sistema.", "dshot", MessageBoxButton.OK,
-                MessageBoxImage.Information);
+            // Like Lightshot: opening dshot again while it runs starts a capture in the running instance.
+            if (EventWaitHandle.TryOpenExisting(CaptureRequestEvent, out var request))
+            {
+                using (request) request.Set();
+            }
+            else
+            {
+                MessageBox.Show("dshot ya está abierto en la bandeja del sistema.", "dshot", MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
             mutex.Dispose();
             return;
         }
 
-        try { new DshotApp(mutex, first).Run(); }
-        finally { if (first) mutex.ReleaseMutex(); mutex.Dispose(); }
+        using var captureRequest = new EventWaitHandle(false, EventResetMode.AutoReset, CaptureRequestEvent);
+        try { new DshotApp(mutex, first, captureRequest).Run(); }
+        finally { mutex.ReleaseMutex(); mutex.Dispose(); }
     }
 
     protected override void OnStartup(StartupEventArgs e)
@@ -87,11 +100,17 @@ internal sealed class DshotApp : System.Windows.Application
         _tray = new Forms.NotifyIcon
         {
             Icon = SystemIcons.Application,
-            Text = "dshot — captura y OCR local",
+            Text = "dshot — clic para capturar",
             ContextMenuStrip = menu,
             Visible = true
         };
-        _tray.DoubleClick += (_, _) => Dispatcher.BeginInvoke(Capture);
+        // Left click on the tray icon captures (as in Lightshot); right click keeps the menu.
+        _tray.MouseClick += (_, e) =>
+        {
+            if (e.Button == Forms.MouseButtons.Left) Dispatcher.BeginInvoke(Capture);
+        };
+        _captureRequestWait = ThreadPool.RegisterWaitForSingleObject(_captureRequest,
+            (_, _) => Dispatcher.BeginInvoke(Capture), null, Timeout.Infinite, executeOnlyOnce: false);
         if (!_hotkeyRegistered && !_printScreenRegistered)
         {
             MessageBox.Show("Impr Pant y Ctrl + Alt + S están ocupados por otras aplicaciones. Usa el icono de dshot en la bandeja para capturar.",
@@ -149,6 +168,7 @@ internal sealed class DshotApp : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _captureRequestWait?.Unregister(null);
         if (_hotkeyRegistered && _hotkeyWindow is not null) UnregisterHotKey(_hotkeyWindow.Handle, HotkeyId);
         if (_printScreenRegistered && _hotkeyWindow is not null) UnregisterHotKey(_hotkeyWindow.Handle, PrintScreenHotkeyId);
         _hotkeyWindow?.Dispose();
