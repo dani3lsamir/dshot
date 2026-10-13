@@ -45,7 +45,7 @@ GitHub Actions can compile the executable, but cannot prove physical shortcut/cl
 1. Start `dshot.exe` (portable, no installer; needs the Windows Desktop Runtime 8+); it stays in your notification area/system tray.
 2. Press **Print Screen** (or **Ctrl+Alt+S**), **left-click the tray icon**, or open `dshot.exe` again while it is running — all start a capture, as in Lightshot.
 3. Drag a selection on your **primary monitor**; everything outside it is dimmed, as in Lightshot.
-4. Floating bar: **Copy** / **OCR** / **▭** rectangle / **➜** arrow / **✎** pen / **T** text / color / undo / **Save** / cancel.
+4. Icon toolbar (hover for names): rectangle, arrow, pen, text, color | undo | OCR (copy text), copy image, save | close. The active drawing tool is highlighted.
 5. **OCR** copies the extracted plain text to the clipboard; paste via Ctrl+V.
 
 Keyboard shortcuts in the capture (as in Lightshot):
