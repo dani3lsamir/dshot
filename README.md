@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/dshot-logo.png" width="128" alt="dshot logo"></p>
+
 # dshot — minimalist screenshot and OCR for Windows
 
 Source project for the standalone **`dshot.exe`** Windows utility.

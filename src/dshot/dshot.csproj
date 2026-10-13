@@ -10,11 +10,17 @@
     <AssemblyName>dshot</AssemblyName>
     <RootNamespace>dshot</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>dshot.ico</ApplicationIcon>
     <PublishTrimmed>false</PublishTrimmed>
     <!-- Run on the newest installed Windows Desktop Runtime (8, 9, 10...), so the exe needs no bundled .NET. -->
     <RollForward>LatestMajor</RollForward>
     <SelfContained>false</SelfContained>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Tray icons: the logo for light taskbars and a light variant for dark taskbars. -->
+    <EmbeddedResource Include="dshot.ico" LogicalName="dshot.ico" />
+    <EmbeddedResource Include="dshot-light.ico" LogicalName="dshot-light.ico" />
+  </ItemGroup>
   <ItemGroup>
     <!-- WinForms is only used via aliases (tray icon, screen bounds); its implicit global usings clash with WPF types. -->
     <Using Remove="System.Windows.Forms" />

@@ -99,7 +99,7 @@ internal sealed class DshotApp : System.Windows.Application
 
         _tray = new Forms.NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = LoadTrayIcon(),
             Text = "dshot — clic para capturar",
             ContextMenuStrip = menu,
             Visible = true
@@ -109,6 +109,7 @@ internal sealed class DshotApp : System.Windows.Application
         {
             if (e.Button == Forms.MouseButtons.Left) Dispatcher.BeginInvoke(Capture);
         };
+        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         _captureRequestWait = ThreadPool.RegisterWaitForSingleObject(_captureRequest,
             (_, _) => Dispatcher.BeginInvoke(Capture), null, Timeout.Infinite, executeOnlyOnce: false);
         if (!_hotkeyRegistered && !_printScreenRegistered)
@@ -153,6 +154,27 @@ internal sealed class DshotApp : System.Windows.Application
         return IntPtr.Zero;
     }
 
+    // Windows paints the tray on the taskbar color, so pick the logo variant that stays visible on it.
+    private static Icon LoadTrayIcon()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+        bool lightTaskbar = key?.GetValue("SystemUsesLightTheme") is int value && value == 1;
+        using var stream = typeof(DshotApp).Assembly.GetManifestResourceStream(lightTaskbar ? "dshot.ico" : "dshot-light.ico");
+        return stream is null ? SystemIcons.Application : new Icon(stream, Forms.SystemInformation.SmallIconSize);
+    }
+
+    private void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category != UserPreferenceCategory.General) return; // Theme switches arrive as General.
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (_tray is null) return;
+            var old = _tray.Icon;
+            _tray.Icon = LoadTrayIcon();
+            old?.Dispose();
+        });
+    }
+
     private static bool IsStartupEnabled()
     {
         using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath);
@@ -169,6 +191,7 @@ internal sealed class DshotApp : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         _captureRequestWait?.Unregister(null);
+        SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
         if (_hotkeyRegistered && _hotkeyWindow is not null) UnregisterHotKey(_hotkeyWindow.Handle, HotkeyId);
         if (_printScreenRegistered && _hotkeyWindow is not null) UnregisterHotKey(_hotkeyWindow.Handle, PrintScreenHotkeyId);
         _hotkeyWindow?.Dispose();
