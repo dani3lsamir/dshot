@@ -37,14 +37,18 @@ internal sealed class OverlayWindow : Window
     private readonly Drawing.Bitmap _snapshot;
     private readonly Canvas _canvas = new() { Background = Brushes.Transparent, ClipToBounds = true };
     private readonly Border _toolbar = new();
-    private readonly Rectangle _selection = new()
+    // Lightshot-style selection: a white edge with a dark inner line, readable on light and dark content.
+    private readonly Border _selection = new()
     {
-        Stroke = Brushes.DeepSkyBlue,
-        StrokeThickness = 2,
-        Fill = new SolidColorBrush(MediaColor.FromArgb(12, 255, 255, 255)),
+        BorderBrush = Brushes.White,
+        BorderThickness = new Thickness(1),
+        Child = new Border { BorderBrush = new SolidColorBrush(MediaColor.FromArgb(140, 0, 0, 0)), BorderThickness = new Thickness(1) },
         IsHitTestVisible = false,
         Visibility = Visibility.Collapsed
     };
+    // Everything outside the selection is dimmed; the selected region keeps its real brightness.
+    private readonly RectangleGeometry _dimArea = new();
+    private readonly RectangleGeometry _dimHole = new(Rect.Empty);
     private readonly List<Mark> _marks = new();
     private readonly MediaColor[] _palette =
     {
@@ -81,7 +85,7 @@ internal sealed class OverlayWindow : Window
         Focusable = true;
 
         // Grab pixels before opening any overlay; exported files never include dshot controls.
-        var screen = Forms.Screen.PrimaryScreen ?? throw new InvalidOperationException("No hay pantalla principal.");
+        var screen = Forms.Screen.PrimaryScreen ?? throw new InvalidOperationException("No primary screen found.");
         var bounds = screen.Bounds;
         _snapshot = new Drawing.Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
         using (var graphics = Drawing.Graphics.FromImage(_snapshot))
@@ -89,10 +93,16 @@ internal sealed class OverlayWindow : Window
 
         var image = new System.Windows.Controls.Image { Source = ToBitmapSource(_snapshot), Stretch = Stretch.Fill,
             IsHitTestVisible = false };
-        var background = new Rectangle { Fill = new SolidColorBrush(MediaColor.FromArgb(68, 0, 0, 0)), IsHitTestVisible = false };
+        var dim = new System.Windows.Shapes.Path
+        {
+            Fill = new SolidColorBrush(MediaColor.FromArgb(110, 0, 0, 0)),
+            Data = new GeometryGroup { FillRule = FillRule.EvenOdd, Children = { _dimArea, _dimHole } },
+            IsHitTestVisible = false
+        };
+        _canvas.SizeChanged += (_, e) => _dimArea.Rect = new Rect(e.NewSize);
         var grid = new Grid();
         grid.Children.Add(image);
-        grid.Children.Add(background);
+        grid.Children.Add(dim);
         grid.Children.Add(_canvas);
         Content = grid;
 
@@ -124,16 +134,16 @@ internal sealed class OverlayWindow : Window
     private void CreateToolbar()
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal };
-        AddTool(row, "Copiar", "Copiar la imagen (Ctrl + C)", () => CopyImage());
-        AddTool(row, "OCR", "Extraer texto (inglés/español)", async () => await ExtractTextAsync());
-        AddTool(row, "▭", "Dibujar rectángulos", () => _mode = EditMode.Rectangle);
-        AddTool(row, "➜", "Dibujar flechas", () => _mode = EditMode.Arrow);
-        AddTool(row, "✎", "Dibujar a mano", () => _mode = EditMode.Pen);
-        AddTool(row, "T", "Escribir texto sobre la imagen", () => _mode = EditMode.Text);
-        AddTool(row, "●", "Cambiar color", NextColor);
-        AddTool(row, "↶", "Deshacer última anotación (Ctrl + Z)", Undo);
-        AddTool(row, "Guardar", "Guardar PNG (Ctrl + S)", SaveImage);
-        AddTool(row, "✕", "Cancelar (Esc)", Close);
+        AddTool(row, "Copy", "Copy image (Ctrl + C)", () => CopyImage());
+        AddTool(row, "OCR", "Extract text (English/Spanish)", async () => await ExtractTextAsync());
+        AddTool(row, "▭", "Rectangle", () => _mode = EditMode.Rectangle);
+        AddTool(row, "➜", "Arrow", () => _mode = EditMode.Arrow);
+        AddTool(row, "✎", "Pen", () => _mode = EditMode.Pen);
+        AddTool(row, "T", "Text", () => _mode = EditMode.Text);
+        AddTool(row, "●", "Change color", NextColor);
+        AddTool(row, "↶", "Undo (Ctrl + Z)", Undo);
+        AddTool(row, "Save", "Save as PNG (Ctrl + S)", SaveImage);
+        AddTool(row, "✕", "Cancel (Esc)", Close);
 
         _toolbar.Child = row;
         _toolbar.Background = new SolidColorBrush(MediaColor.FromRgb(31, 34, 42));
@@ -296,6 +306,7 @@ internal sealed class OverlayWindow : Window
             {
                 _selection.Visibility = Visibility.Collapsed;
                 _selected = Rect.Empty;
+                _dimHole.Rect = Rect.Empty;
                 return;
             }
             _mode = EditMode.Rectangle; // When selected, toolbar lets user choose annotation mode.
@@ -342,6 +353,7 @@ internal sealed class OverlayWindow : Window
         Canvas.SetTop(_selection, _selected.Top);
         _selection.Width = _selected.Width;
         _selection.Height = _selected.Height;
+        _dimHole.Rect = _selected;
     }
 
     private static Rect Normalize(Point a, Point b) => new(
@@ -419,7 +431,7 @@ internal sealed class OverlayWindow : Window
 
     private Drawing.Bitmap ComposeImage(bool annotations)
     {
-        if (_selected.IsEmpty) throw new InvalidOperationException("Primero selecciona una región.");
+        if (_selected.IsEmpty) throw new InvalidOperationException("Select a region first.");
         double xScale = _snapshot.Width / _canvas.ActualWidth;
         double yScale = _snapshot.Height / _canvas.ActualHeight;
         int x = Math.Clamp((int)Math.Floor(_selected.Left * xScale), 0, _snapshot.Width - 1);
@@ -488,19 +500,19 @@ internal sealed class OverlayWindow : Window
             var result = await OcrService.ExtractAsync(bitmap);
             if (string.IsNullOrWhiteSpace(result))
             {
-                Warn("No se detectó texto. Prueba con una región más grande o texto con mejor contraste.");
+                Warn("No text found. Try a larger region or text with better contrast.");
                 return;
             }
             System.Windows.Clipboard.SetText(result);
             Close();
         }
-        catch (Exception ex) { Warn("Falló el reconocimiento de texto: " + ex.Message); }
+        catch (Exception ex) { Warn("Text recognition failed: " + ex.Message); }
         finally { _busy = false; Cursor = Cursors.Arrow; }
     }
 
     private void SaveImage()
     {
-        var dialog = new SaveFileDialog { Filter = "Imagen PNG|*.png", DefaultExt = ".png",
+        var dialog = new SaveFileDialog { Filter = "PNG image|*.png", DefaultExt = ".png",
             AddExtension = true, FileName = $"dshot_{DateTime.Now:yyyyMMdd_HHmmss}.png" };
         if (dialog.ShowDialog(this) != true) return;
         try
@@ -509,7 +521,7 @@ internal sealed class OverlayWindow : Window
             bitmap.Save(dialog.FileName, ImageFormat.Png);
             Close();
         }
-        catch (Exception ex) { Warn("No se pudo guardar: " + ex.Message); }
+        catch (Exception ex) { Warn("Could not save: " + ex.Message); }
     }
 
     private void Warn(string message) => MessageBox.Show(this, message, "dshot",

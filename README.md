@@ -44,8 +44,8 @@ GitHub Actions can compile the executable, but cannot prove physical shortcut/cl
 
 1. Start `dshot.exe` (portable, no installer; needs the Windows Desktop Runtime 8+); it stays in your notification area/system tray.
 2. Press **Print Screen** (or **Ctrl+Alt+S**), **left-click the tray icon**, or open `dshot.exe` again while it is running — all start a capture, as in Lightshot.
-3. Drag a selection on your **primary monitor**.
-4. Floating bar: **Copiar** / **OCR** / **▭** rectangle / **➜** arrow / **✎** pen / **T** text / color / undo / **Guardar** / cancel.
+3. Drag a selection on your **primary monitor**; everything outside it is dimmed, as in Lightshot.
+4. Floating bar: **Copy** / **OCR** / **▭** rectangle / **➜** arrow / **✎** pen / **T** text / color / undo / **Save** / cancel.
 5. **OCR** copies the extracted plain text to the clipboard; paste via Ctrl+V.
 
 Keyboard shortcuts in the capture (as in Lightshot):
@@ -59,7 +59,7 @@ Keyboard shortcuts in the capture (as in Lightshot):
 
 With the **T** tool, click on the image and type: the text appears directly over the screenshot in the current color. **Enter** starts a new line; click elsewhere (or press Esc) to finish it.
 
-**Print Screen on Windows 11/10:** Windows can reserve the key for Snipping Tool. If dshot shows a "Impr Pant no disponible" notice, turn off *Settings > Accessibility > Keyboard > Use the Print screen key to open Snipping Tool* (Windows 10: *Ease of Access > Keyboard*) and restart dshot. Ctrl+Alt+S keeps working meanwhile.
+**Print Screen on Windows 11/10:** Windows can reserve the key for Snipping Tool. If dshot shows a "Print Screen unavailable" notice, close other screenshot apps (e.g. Lightshot) and turn off *Settings > Accessibility > Keyboard > Use the Print screen key to open screen capture* (Windows 10: *Ease of Access > Keyboard*) and restart dshot. Ctrl+Alt+S keeps working meanwhile.
 
 For Windows OCR in Spanish and English, install matching Windows OCR language capabilities via system language settings. Automatic language selection is heuristic, and may not recognize mixed-language text perfectly.
 

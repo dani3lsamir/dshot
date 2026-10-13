@@ -18,7 +18,7 @@ internal static class OcrService
     {
         var languages = OcrEngine.AvailableRecognizerLanguages.ToArray();
         if (languages.Length == 0)
-            throw new InvalidOperationException("No hay paquetes OCR instalados. Agrega Español e Inglés en Configuración > Hora e idioma > Idioma y región.");
+            throw new InvalidOperationException("No OCR language packs are installed. Add English and/or Spanish in Settings > Time & language > Language & region.");
 
         var preferred = languages
             .Where(lang => lang.LanguageTag.StartsWith("es", StringComparison.OrdinalIgnoreCase) ||
@@ -26,7 +26,7 @@ internal static class OcrService
             .OrderBy(lang => lang.LanguageTag.StartsWith("es", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
             .ToArray();
         if (preferred.Length == 0)
-            throw new InvalidOperationException("No se encontraron reconocedores OCR de español o inglés. Instala los paquetes de idioma correspondientes de Windows.");
+            throw new InvalidOperationException("No English or Spanish OCR recognizer was found. Install the matching Windows language packs.");
 
         using var prepared = FitToOcrLimits(original);
         using var softwareBitmap = ToSoftwareBitmap(prepared);
