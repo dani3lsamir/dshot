@@ -53,7 +53,7 @@ internal sealed class DshotApp : System.Windows.Application
             }
             else
             {
-                MessageBox.Show("dshot ya está abierto en la bandeja del sistema.", "dshot", MessageBoxButton.OK,
+                MessageBox.Show("dshot is already running in the system tray.", "dshot", MessageBoxButton.OK,
                     MessageBoxImage.Information);
             }
             mutex.Dispose();
@@ -82,25 +82,25 @@ internal sealed class DshotApp : System.Windows.Application
         _printScreenRegistered = RegisterHotKey(_hotkeyWindow.Handle, PrintScreenHotkeyId, ModNoRepeat, KeyPrintScreen);
 
         var menu = new Forms.ContextMenuStrip();
-        menu.Items.Add("Capturar (Impr Pant / Ctrl + Alt + S)", null, (_, _) => Dispatcher.BeginInvoke(Capture));
-        var startupItem = new Forms.ToolStripMenuItem("Iniciar con Windows") { Checked = IsStartupEnabled(), CheckOnClick = true };
+        menu.Items.Add("Capture (Print Screen / Ctrl + Alt + S)", null, (_, _) => Dispatcher.BeginInvoke(Capture));
+        var startupItem = new Forms.ToolStripMenuItem("Start with Windows") { Checked = IsStartupEnabled(), CheckOnClick = true };
         startupItem.Click += (_, _) =>
         {
             try { SetStartupEnabled(startupItem.Checked); }
             catch (Exception ex)
             {
                 startupItem.Checked = !startupItem.Checked;
-                MessageBox.Show(ex.Message, "Inicio automático", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(ex.Message, "Start with Windows", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         };
         menu.Items.Add(startupItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("Salir", null, (_, _) => Dispatcher.BeginInvoke(() => Shutdown()));
+        menu.Items.Add("Exit", null, (_, _) => Dispatcher.BeginInvoke(() => Shutdown()));
 
         _tray = new Forms.NotifyIcon
         {
             Icon = LoadTrayIcon(),
-            Text = "dshot — clic para capturar",
+            Text = "dshot — click to capture",
             ContextMenuStrip = menu,
             Visible = true
         };
@@ -114,15 +114,15 @@ internal sealed class DshotApp : System.Windows.Application
             (_, _) => Dispatcher.BeginInvoke(Capture), null, Timeout.Infinite, executeOnlyOnce: false);
         if (!_hotkeyRegistered && !_printScreenRegistered)
         {
-            MessageBox.Show("Impr Pant y Ctrl + Alt + S están ocupados por otras aplicaciones. Usa el icono de dshot en la bandeja para capturar.",
-                "Atajo no disponible", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show("Print Screen and Ctrl + Alt + S are used by other apps. Click the dshot tray icon to capture.",
+                "Shortcut unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         else if (!_printScreenRegistered)
         {
             // A balloon instead of a dialog: this can repeat on every sign-in until the Windows setting is changed.
-            _tray.ShowBalloonTip(10000, "Impr Pant no disponible",
-                "Windows u otra app usa Impr Pant. Desactiva \"Usar la tecla Imprimir pantalla para abrir la herramienta Recortes\" " +
-                "en Configuración > Accesibilidad > Teclado y reinicia dshot. Mientras tanto usa Ctrl + Alt + S.",
+            _tray.ShowBalloonTip(10000, "Print Screen unavailable",
+                "Windows or another app (e.g. Lightshot) owns Print Screen. Turn off \"Use the Print screen key to open screen capture\" " +
+                "in Settings > Accessibility > Keyboard, close other screenshot apps and restart dshot. Ctrl + Alt + S works meanwhile.",
                 Forms.ToolTipIcon.Warning);
         }
     }
@@ -140,7 +140,7 @@ internal sealed class DshotApp : System.Windows.Application
         catch (Exception ex)
         {
             _overlay = null;
-            MessageBox.Show($"No se pudo capturar: {ex.Message}", "dshot", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Capture failed: {ex.Message}", "dshot", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
