@@ -117,62 +117,119 @@ internal sealed class OverlayWindow : Window
         Loaded += (_, _) => Focus();
     }
 
-    private static BitmapImage ToBitmapSource(Drawing.Bitmap bitmap)
+    // Copies the pixels straight into a WPF bitmap (Format32bppArgb is BGRA in memory). Avoids a PNG
+    // encode/decode of the whole screen, so the overlay opens faster and uses less memory.
+    private static BitmapSource ToBitmapSource(Drawing.Bitmap bitmap)
     {
-        using var ms = new MemoryStream();
-        bitmap.Save(ms, ImageFormat.Png);
-        ms.Position = 0;
-        var result = new BitmapImage();
-        result.BeginInit();
-        result.CacheOption = BitmapCacheOption.OnLoad;
-        result.StreamSource = ms;
-        result.EndInit();
-        result.Freeze();
-        return result;
+        var data = bitmap.LockBits(new Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height),
+            ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        try
+        {
+            var source = BitmapSource.Create(bitmap.Width, bitmap.Height, 96, 96, PixelFormats.Bgra32, null,
+                data.Scan0, data.Stride * bitmap.Height, data.Stride);
+            source.Freeze();
+            return source;
+        }
+        finally { bitmap.UnlockBits(data); }
     }
+
+    // Icon-only toolbar, as in Lightshot. Icons are 16x16 stroke paths; tooltips name each tool.
+    private static class Icons
+    {
+        public const string Rectangle = "M2.5,3.5 H13.5 V12.5 H2.5 Z";
+        public const string Arrow = "M3,13 L13,3 M7.5,3 H13 V8.5";
+        public const string Pen = "M2.5,13.5 L3.5,10 L10.5,3 A1.4,1.4 0 0 1 13,5.5 L6,12.5 Z M9,4.5 L11.5,7";
+        public const string Text = "M3,3 H13 M8,3 V13.5 M6,13.5 H10";
+        public const string Undo = "M5.5,3.5 L2.5,6.5 L5.5,9.5 M2.5,6.5 H9.5 A3.5,3.5 0 0 1 9.5,13.5 H6.5";
+        public const string Ocr = "M2,5.5 V2 H5.5 M10.5,2 H14 V5.5 M14,10.5 V14 H10.5 M5.5,14 H2 V10.5 M5.5,5.5 H10.5 M8,5.5 V10.5";
+        public const string Copy = "M6,6 H13.5 V13.5 H6 Z M3.5,10.5 H2.5 V2.5 H10.5 V3.5";
+        public const string Save = "M2.5,2.5 H11 L13.5,5 V13.5 H2.5 Z M5,2.5 V6 H10 V2.5 M5,13.5 V9.5 H11 V13.5";
+        public const string Close = "M4,4 L12,12 M12,4 L4,12";
+    }
+
+    private static readonly Brush ActiveToolBrush = new SolidColorBrush(MediaColor.FromRgb(74, 80, 90));
+    private static readonly ControlTemplate ToolTemplate = (ControlTemplate)System.Windows.Markup.XamlReader.Parse(
+        "<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' " +
+        "xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='Button'>" +
+        "<Border x:Name='Chrome' Background='{TemplateBinding Background}' CornerRadius='5'>" +
+        "<ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/></Border>" +
+        "<ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'>" +
+        "<Setter TargetName='Chrome' Property='Background' Value='#3A3F49'/></Trigger></ControlTemplate.Triggers>" +
+        "</ControlTemplate>");
+
+    private readonly Dictionary<EditMode, Button> _modeButtons = new();
+    private readonly System.Windows.Shapes.Ellipse _colorSwatch = new()
+    {
+        Width = 12, Height = 12, Stroke = Brushes.White, StrokeThickness = 1.4
+    };
 
     private void CreateToolbar()
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal };
-        AddTool(row, "Copy", "Copy image (Ctrl + C)", () => CopyImage());
-        AddTool(row, "OCR", "Extract text (English/Spanish)", async () => await ExtractTextAsync());
-        AddTool(row, "▭", "Rectangle", () => _mode = EditMode.Rectangle);
-        AddTool(row, "➜", "Arrow", () => _mode = EditMode.Arrow);
-        AddTool(row, "✎", "Pen", () => _mode = EditMode.Pen);
-        AddTool(row, "T", "Text", () => _mode = EditMode.Text);
-        AddTool(row, "●", "Change color", NextColor);
-        AddTool(row, "↶", "Undo (Ctrl + Z)", Undo);
-        AddTool(row, "Save", "Save as PNG (Ctrl + S)", SaveImage);
-        AddTool(row, "✕", "Cancel (Esc)", Close);
+        _modeButtons[EditMode.Rectangle] = AddTool(row, ToolIcon(Icons.Rectangle), "Rectangle", () => SetMode(EditMode.Rectangle));
+        _modeButtons[EditMode.Arrow] = AddTool(row, ToolIcon(Icons.Arrow), "Arrow", () => SetMode(EditMode.Arrow));
+        _modeButtons[EditMode.Pen] = AddTool(row, ToolIcon(Icons.Pen), "Pen", () => SetMode(EditMode.Pen));
+        _modeButtons[EditMode.Text] = AddTool(row, ToolIcon(Icons.Text), "Text", () => SetMode(EditMode.Text));
+        _colorSwatch.Fill = new SolidColorBrush(_palette[_paletteIndex]);
+        AddTool(row, _colorSwatch, "Color", NextColor);
+        AddSeparator(row);
+        AddTool(row, ToolIcon(Icons.Undo), "Undo (Ctrl + Z)", Undo);
+        AddSeparator(row);
+        AddTool(row, ToolIcon(Icons.Ocr), "Copy text — OCR (English/Spanish)", async () => await ExtractTextAsync());
+        AddTool(row, ToolIcon(Icons.Copy), "Copy image (Ctrl + C)", () => CopyImage());
+        AddTool(row, ToolIcon(Icons.Save), "Save as PNG (Ctrl + S)", SaveImage);
+        AddSeparator(row);
+        AddTool(row, ToolIcon(Icons.Close), "Close (Esc)", Close);
 
         _toolbar.Child = row;
         _toolbar.Background = new SolidColorBrush(MediaColor.FromRgb(31, 34, 42));
         _toolbar.BorderBrush = new SolidColorBrush(MediaColor.FromRgb(90, 96, 105));
         _toolbar.BorderThickness = new Thickness(1);
         _toolbar.CornerRadius = new CornerRadius(7);
-        _toolbar.Padding = new Thickness(4);
+        _toolbar.Padding = new Thickness(3);
         _toolbar.Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 12, ShadowDepth = 3, Opacity = 0.5 };
         _toolbar.Visibility = Visibility.Collapsed;
         _toolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
     }
 
-    private static void AddTool(Panel panel, string label, string tooltip, Action action)
+    private static UIElement ToolIcon(string pathData) => new System.Windows.Shapes.Path
+    {
+        Data = Geometry.Parse(pathData),
+        Width = 16, Height = 16,
+        Stroke = Brushes.White, StrokeThickness = 1.5,
+        StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round, StrokeLineJoin = PenLineJoin.Round
+    };
+
+    private static Button AddTool(Panel panel, UIElement icon, string tooltip, Action action)
     {
         var button = new Button
         {
-            Content = label,
+            Content = icon,
             ToolTip = tooltip,
-            MinWidth = label.Length > 3 ? 66 : 36,
-            Height = 32,
-            Margin = new Thickness(2, 0, 2, 0),
-            Padding = new Thickness(4, 0, 4, 0),
-            Background = new SolidColorBrush(MediaColor.FromRgb(55, 59, 68)),
-            Foreground = Brushes.White,
-            BorderThickness = new Thickness(0),
+            Template = ToolTemplate,
+            Width = 30, Height = 30,
+            Margin = new Thickness(1, 0, 1, 0),
+            Background = Brushes.Transparent,
+            FocusVisualStyle = null,
             Cursor = Cursors.Hand
         };
         button.Click += (_, _) => action();
         panel.Children.Add(button);
+        return button;
+    }
+
+    private static void AddSeparator(Panel panel) => panel.Children.Add(new Border
+    {
+        Width = 1, Height = 18, Margin = new Thickness(4, 0, 4, 0), VerticalAlignment = VerticalAlignment.Center,
+        Background = new SolidColorBrush(MediaColor.FromRgb(74, 80, 90))
+    });
+
+    // Highlights the active drawing tool so it is clear what a drag on the screenshot will do.
+    private void SetMode(EditMode mode)
+    {
+        _mode = mode;
+        foreach (var (toolMode, button) in _modeButtons)
+            button.Background = toolMode == mode ? ActiveToolBrush : Brushes.Transparent;
     }
 
     // Lightshot-style shortcuts: Esc closes, Ctrl+C copies, Ctrl+S saves, Ctrl+Z undoes.
@@ -212,6 +269,7 @@ internal sealed class OverlayWindow : Window
     private void NextColor()
     {
         _paletteIndex = (_paletteIndex + 1) % _palette.Length;
+        _colorSwatch.Fill = new SolidColorBrush(_palette[_paletteIndex]);
         if (_textEdit is not null)
         {
             var brush = new SolidColorBrush(_palette[_paletteIndex]);
@@ -309,7 +367,7 @@ internal sealed class OverlayWindow : Window
                 _dimHole.Rect = Rect.Empty;
                 return;
             }
-            _mode = EditMode.Rectangle; // When selected, toolbar lets user choose annotation mode.
+            SetMode(EditMode.Rectangle); // When selected, toolbar lets user choose annotation mode.
             PlaceToolbar();
             return;
         }

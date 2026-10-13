@@ -133,7 +133,12 @@ internal sealed class DshotApp : System.Windows.Application
         try
         {
             _overlay = new OverlayWindow();
-            _overlay.Closed += (_, _) => _overlay = null;
+            _overlay.Closed += (_, _) =>
+            {
+                _overlay = null;
+                // A capture holds several full-screen bitmaps; release them now so the idle tray app stays small.
+                GC.Collect();
+            };
             _overlay.Show();
             _overlay.Activate();
         }
