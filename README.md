@@ -68,7 +68,7 @@ Uninstall with `~/.local/share/dshot/uninstall.sh`; it also restores the desktop
 
 ## Troubleshooting
 
-- **Windows, "Print Screen unavailable" notice:** another app owns the key. Close other screenshot tools (Lightshot, ShareX...) and turn off *Settings > Accessibility > Keyboard > Use the Print screen key to open screen capture*, then restart dshot. Ctrl+Alt+S works meanwhile.
+- **Windows, Print Screen opens another tool:** dshot catches Print Screen before Windows does (since v0.8.1), even while *Settings > Bluetooth & devices > Keyboard > Use the Print screen key to open screen capture* is on. If another tool still opens, close other screenshot apps (Lightshot, ShareX...) and restart dshot. Ctrl+Alt+S always works.
 - **Windows, OCR says no language packs are installed:** add English and/or Spanish in *Settings > Time & language > Language & region*. Mixed-language text is recognized on a best-effort basis.
 - **Linux, Print Screen still opens the desktop's screenshot tool:** on KDE, log out and back in after installing, or set it in *System Settings > Keyboard > Shortcuts* (add the command `~/.local/bin/dshot --capture` and remove Print from Spectacle). On Cinnamon, check *Keyboard > Shortcuts > Custom shortcuts*.
 - **Linux, no tray icon:** GNOME needs the "AppIndicator and KStatusNotifierItem Support" extension. Without a tray, run `dshot` (or press the bound key) to capture.

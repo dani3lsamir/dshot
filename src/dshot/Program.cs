@@ -31,6 +31,7 @@ internal sealed class DshotApp : System.Windows.Application
     private OverlayWindow? _overlay;
     private bool _hotkeyRegistered;
     private bool _printScreenRegistered;
+    private PrintScreenHook? _printScreenHook;
 
     private DshotApp(System.Threading.Mutex mutex, bool firstInstance, EventWaitHandle captureRequest)
     {
@@ -78,8 +79,11 @@ internal sealed class DshotApp : System.Windows.Application
         _hotkeyWindow = new HwndSource(parameters);
         _hotkeyWindow.AddHook(HotkeyHook);
         _hotkeyRegistered = RegisterHotKey(_hotkeyWindow.Handle, HotkeyId, ModAlt | ModControl | ModNoRepeat, KeyS);
-        // Plain Print Screen, like Lightshot. Fails when Windows (Snipping Tool) or another app already owns the key.
-        _printScreenRegistered = RegisterHotKey(_hotkeyWindow.Handle, PrintScreenHotkeyId, ModNoRepeat, KeyPrintScreen);
+        // Plain Print Screen, like Lightshot. A low-level keyboard hook sees the key before Windows does, so it works
+        // even while Windows reserves Print Screen for its own screen capture. A hotkey is only the fallback.
+        _printScreenHook = PrintScreenHook.TryStart(() => Dispatcher.BeginInvoke(Capture));
+        if (_printScreenHook is null)
+            _printScreenRegistered = RegisterHotKey(_hotkeyWindow.Handle, PrintScreenHotkeyId, ModNoRepeat, KeyPrintScreen);
 
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("Capture (Print Screen / Ctrl + Alt + S)", null, (_, _) => Dispatcher.BeginInvoke(Capture));
@@ -112,17 +116,18 @@ internal sealed class DshotApp : System.Windows.Application
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         _captureRequestWait = ThreadPool.RegisterWaitForSingleObject(_captureRequest,
             (_, _) => Dispatcher.BeginInvoke(Capture), null, Timeout.Infinite, executeOnlyOnce: false);
-        if (!_hotkeyRegistered && !_printScreenRegistered)
+        bool printScreenWorks = _printScreenHook is not null || _printScreenRegistered;
+        if (!_hotkeyRegistered && !printScreenWorks)
         {
             MessageBox.Show("Print Screen and Ctrl + Alt + S are used by other apps. Click the dshot tray icon to capture.",
                 "Shortcut unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
-        else if (!_printScreenRegistered)
+        else if (!printScreenWorks)
         {
             // A balloon instead of a dialog: this can repeat on every sign-in until the Windows setting is changed.
             _tray.ShowBalloonTip(10000, "Print Screen unavailable",
                 "Windows or another app (e.g. Lightshot) owns Print Screen. Turn off \"Use the Print screen key to open screen capture\" " +
-                "in Settings > Accessibility > Keyboard, close other screenshot apps and restart dshot. Ctrl + Alt + S works meanwhile.",
+                "in Settings > Bluetooth & devices > Keyboard, close other screenshot apps and restart dshot. Ctrl + Alt + S works meanwhile.",
                 Forms.ToolTipIcon.Warning);
         }
     }
@@ -196,6 +201,7 @@ internal sealed class DshotApp : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         _captureRequestWait?.Unregister(null);
+        _printScreenHook?.Dispose();
         SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
         if (_hotkeyRegistered && _hotkeyWindow is not null) UnregisterHotKey(_hotkeyWindow.Handle, HotkeyId);
         if (_printScreenRegistered && _hotkeyWindow is not null) UnregisterHotKey(_hotkeyWindow.Handle, PrintScreenHotkeyId);
