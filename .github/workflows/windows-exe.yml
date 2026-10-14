@@ -1,9 +1,9 @@
-name: Build dshot.exe
+name: Build dshot
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Create a GitHub prerelease with this tag (e.g. v0.1.0). Leave empty to only build.'
+        description: 'Publish a GitHub release with this tag (e.g. v0.8.0). Leave empty to only build.'
         required: false
         default: ''
   push:
@@ -13,8 +13,6 @@ on:
 jobs:
   windows-build:
     runs-on: windows-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -38,20 +36,69 @@ jobs:
           name: dshot-Windows-x64
           path: release/**
           if-no-files-found: error
+
+  linux-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-eng tesseract-ocr-spa \
+            libegl1 libxkbcommon0 libfontconfig1 fonts-dejavu-core shellcheck
+          pip install --quiet PySide6-Essentials jeepney pyflakes
+      - name: Lint
+        run: |
+          python -m pyflakes linux/dshot linux/tests
+          shellcheck linux/install.sh linux/uninstall.sh
+      - name: Unit tests (offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s linux/tests -v
+      - name: Package
+        run: |
+          mkdir -p dist/dshot-linux
+          cp -r linux/dshot linux/install.sh linux/uninstall.sh dist/dshot-linux/
+          find dist -name '__pycache__' -prune -exec rm -rf {} +
+          tar -C dist -czf dist/dshot-linux.tar.gz dshot-linux
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dshot-Linux
+          path: dist/dshot-linux.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+    needs: [windows-build, linux-build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download build outputs
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
-          $notes = @"
-          Test build of dshot for Windows 10/11 x64 (single portable exe, ~25 MB).
+          cat > notes.md <<'EOF'
+          **Windows 10/11 x64:** download `dshot.exe` (portable, ~26 MB). Needs the Microsoft Windows Desktop Runtime 8 or newer (x64). The exe is unsigned, so SmartScreen may warn: choose *More info > Run anyway*.
 
-          Requires the Microsoft Windows Desktop Runtime 8 or newer (x64). If it is missing, Windows shows a download link on first start.
+          **Linux (CachyOS/Arch, Linux Mint/Ubuntu):** download `dshot-linux.tar.gz`, then:
 
-          - The exe is unsigned, so Windows SmartScreen may warn: choose More info -> Run anyway.
-          - Press Ctrl+Alt+S (or double-click the tray icon) to capture. Primary monitor only.
-          - OCR needs the English/Spanish Windows language packs installed.
-          "@
-          gh release create "$env:TAG" release/dshot.exe --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "dshot $env:TAG" --prerelease --notes $notes
+          ```sh
+          tar xzf dshot-linux.tar.gz && cd dshot-linux && ./install.sh
+          ```
+
+          Capture with Print Screen (after the installer binds it) or a left click on the tray icon. OCR supports English and Spanish.
+          EOF
+          gh release create "$TAG" artifacts/dshot-Windows-x64/dshot.exe artifacts/dshot-Linux/dshot-linux.tar.gz \
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "dshot $TAG" --notes-file notes.md
