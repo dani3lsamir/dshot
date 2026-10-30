@@ -116,6 +116,8 @@ internal sealed class DshotApp : System.Windows.Application
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         _captureRequestWait = ThreadPool.RegisterWaitForSingleObject(_captureRequest,
             (_, _) => Dispatcher.BeginInvoke(Capture), null, Timeout.Infinite, executeOnlyOnce: false);
+        // Parse the overlay's toolbar template while idle, so the first capture opens without that delay.
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, new Action(OverlayWindow.Prepare));
         bool printScreenWorks = _printScreenHook is not null || _printScreenRegistered;
         if (!_hotkeyRegistered && !printScreenWorks)
         {

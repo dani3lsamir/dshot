@@ -51,7 +51,9 @@ def split_virtual_desktop(full: QImage, screens: list[QScreen]) -> list[ScreenSh
     Assumes a uniform scale across screens; mixed per-monitor scaling may be slightly off.
     """
     crops = crop_rects(full.width(), full.height(), [screen.geometry() for screen in screens])
-    return [ScreenShot(screen, screen.geometry(), full.copy(crop)) for screen, crop in zip(screens, crops)]
+    # A single screen is the whole image: use it as is instead of copying every pixel.
+    return [ScreenShot(screen, screen.geometry(), full if crop == full.rect() else full.copy(crop))
+            for screen, crop in zip(screens, crops)]
 
 
 def crop_rects(width: int, height: int, geometries: list[QRect]) -> list[QRect]:

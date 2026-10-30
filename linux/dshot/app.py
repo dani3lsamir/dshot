@@ -21,8 +21,8 @@ from dshot.ipc import socket_path
 from dshot.overlay import CaptureSession
 
 AUTOSTART_FILE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "autostart" / "dshot.desktop"
-# Short pause so the tray menu or the key press is gone before the screen is grabbed.
-CAPTURE_DELAY_MS = 180
+# Short pause so the tray menu is gone before the screen is grabbed. Other triggers capture at once.
+MENU_CAPTURE_DELAY_MS = 180
 
 
 def launcher_command() -> str:
@@ -60,7 +60,7 @@ class DshotApp(QObject):
         self.tray.setToolTip("dshot - click to capture")
         menu = QMenu()
         capture = QAction("Capture", menu)
-        capture.triggered.connect(self.request_capture)
+        capture.triggered.connect(lambda: self.request_capture(MENU_CAPTURE_DELAY_MS))
         menu.addAction(capture)
         startup = QAction("Start at login", menu, checkable=True)
         startup.setChecked(startup_enabled())
@@ -102,8 +102,8 @@ class DshotApp(QObject):
             else:
                 self.request_capture()
 
-    def request_capture(self) -> None:
-        QTimer.singleShot(CAPTURE_DELAY_MS, self.capture)
+    def request_capture(self, delay_ms: int = 0) -> None:
+        QTimer.singleShot(delay_ms, self.capture)
 
     def capture(self) -> None:
         if self._session is not None:

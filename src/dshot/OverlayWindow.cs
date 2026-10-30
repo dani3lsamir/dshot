@@ -3,9 +3,12 @@ using System.Collections.Generic;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
@@ -116,6 +119,22 @@ internal sealed class OverlayWindow : Window
         Closed += (_, _) => _snapshot.Dispose();
         Loaded += (_, _) => Focus();
     }
+
+    // Windows animates new windows in (a fade/zoom of a few hundred ms), which makes the capture feel slow
+    // to appear. The overlay should show the frozen screen at once, as Lightshot does.
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        int disabled = 1;
+        DwmSetWindowAttribute(new WindowInteropHelper(this).Handle, DwmwaTransitionsForceDisabled, ref disabled, sizeof(int));
+    }
+
+    private const int DwmwaTransitionsForceDisabled = 3;
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    /// <summary>Does the one-time setup (toolbar template parse) ahead of the first capture.</summary>
+    public static void Prepare() => RuntimeHelpers.RunClassConstructor(typeof(OverlayWindow).TypeHandle);
 
     // Copies the pixels straight into a WPF bitmap (Format32bppArgb is BGRA in memory). Avoids a PNG
     // encode/decode of the whole screen, so the overlay opens faster and uses less memory.

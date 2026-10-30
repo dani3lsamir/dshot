@@ -8,11 +8,11 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from PySide6.QtCore import QEventLoop, QPointF, QRect, QRectF, QSize, Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter  # noqa: E402
+from PySide6.QtCore import QEvent, QEventLoop, QPointF, QRect, QRectF, QSize, Qt, QTimer  # noqa: E402
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QMouseEvent, QPainter  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from dshot.capture import ScreenShot, crop_rects  # noqa: E402
+from dshot.capture import ScreenShot, crop_rects, split_virtual_desktop  # noqa: E402
 from dshot.ocr import OcrJob, clean  # noqa: E402
 from dshot.overlay import CaptureSession, Mark, Tool, compose  # noqa: E402
 
@@ -56,6 +56,12 @@ class GeometryTests(unittest.TestCase):
     def test_crop_rects_negative_origin(self):
         rects = crop_rects(3000, 1080, [QRect(-1080, 0, 1080, 1080), QRect(0, 0, 1920, 1080)])
         self.assertEqual(rects, [QRect(0, 0, 1080, 1080), QRect(1080, 0, 1920, 1080)])
+
+    def test_single_screen_portal_image_is_not_copied(self):
+        screen = QGuiApplication.primaryScreen()
+        full = QImage(screen.geometry().size() * 2, QImage.Format.Format_RGB32)
+        shots = split_virtual_desktop(full, [screen])
+        self.assertEqual(shots[0].image.cacheKey(), full.cacheKey())
 
     def test_compose_crops_at_device_resolution_with_marks(self):
         # Screen shown at 400x200 logical, captured at 2x (800x400 pixels), solid blue.
@@ -107,6 +113,27 @@ class OverlayTests(unittest.TestCase):
         overlay.marks.append(Mark(Tool.ARROW, QColor("red"), [QPointF(120, 120), QPointF(300, 250)]))
         overlay.undo()
         self.assertEqual(overlay.marks, [])
+        session.close()
+
+    def test_drag_repaints_only_around_the_selection(self):
+        session = self.make_session()
+        overlay = session.overlays[0]
+        overlay.resize(800, 600)
+        areas = []
+        overlay.update = lambda *args: areas.append(args)
+
+        def mouse(kind, x, y):
+            buttons = Qt.MouseButton.LeftButton if kind != QEvent.Type.MouseButtonRelease else Qt.MouseButton.NoButton
+            return QMouseEvent(kind, QPointF(x, y), QPointF(x, y), Qt.MouseButton.LeftButton, buttons,
+                               Qt.KeyboardModifier.NoModifier)
+
+        overlay.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, 100, 100))
+        areas.clear()
+        overlay.mouseMoveEvent(mouse(QEvent.Type.MouseMove, 200, 150))
+        overlay.mouseMoveEvent(mouse(QEvent.Type.MouseMove, 180, 170))
+        self.assertEqual(areas[-1], (QRect(98, 98, 104, 74),))  # Old and new selection, plus the border.
+        overlay.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, 180, 170))
+        self.assertEqual(overlay.selection, QRectF(100, 100, 80, 70))
         session.close()
 
     def test_text_commit_and_copy(self):
