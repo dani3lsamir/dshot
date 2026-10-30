@@ -330,7 +330,9 @@ class OverlayWindow(QWidget):
             return
         pos = event.position()
         if self.tool is Tool.SELECT:
+            previous = self.selection
             self.selection = normalized(self._drag_start, pos).intersected(QRectF(self.rect()))
+            self.update_area(previous.united(self.selection))
         elif self._active:
             pos = QPointF(min(max(pos.x(), self.selection.left()), self.selection.right()),
                           min(max(pos.y(), self.selection.top()), self.selection.bottom()))
@@ -338,7 +340,11 @@ class OverlayWindow(QWidget):
                 self._active.points.append(pos)
             else:
                 self._active.points[-1] = pos
-        self.update()
+            self.update_area(self.selection)  # Marks are clipped to the selection.
+
+    def update_area(self, area: QRectF) -> None:
+        """Repaints only around `area` (plus the selection border), not the whole screen, while dragging."""
+        self.update(area.toAlignedRect().adjusted(-2, -2, 2, 2))
 
     def mouseReleaseEvent(self, event) -> None:
         if self._drag_start is None or event.button() != Qt.MouseButton.LeftButton:
