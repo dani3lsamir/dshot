@@ -35,6 +35,7 @@ internal sealed class OverlayWindow : Window
     }
 
     private readonly Drawing.Bitmap _snapshot;
+    private readonly Drawing.Rectangle _bounds; // Virtual desktop in physical pixels; the snapshot's origin.
     private readonly Canvas _canvas = new() { Background = Brushes.Transparent, ClipToBounds = true };
     private readonly Border _toolbar = new();
     // Lightshot-style selection: a white edge with a dark inner line, readable on light and dark content.
@@ -78,18 +79,19 @@ internal sealed class OverlayWindow : Window
         Title = "dshot";
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
-        WindowState = WindowState.Maximized;
+        WindowStartupLocation = WindowStartupLocation.Manual;
         ShowInTaskbar = false;
         Topmost = true;
         Background = Brushes.Black;
         Focusable = true;
 
-        // Grab pixels before opening any overlay; exported files never include dshot controls.
-        var screen = Forms.Screen.PrimaryScreen ?? throw new InvalidOperationException("No primary screen found.");
-        var bounds = screen.Bounds;
-        _snapshot = new Drawing.Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
+        // Grab pixels before opening any overlay; exported files never include dshot controls. The capture spans
+        // the whole virtual desktop (every monitor), in physical pixels since the app is per-monitor DPI aware.
+        _bounds = Forms.SystemInformation.VirtualScreen;
+        if (_bounds.Width <= 0 || _bounds.Height <= 0) throw new InvalidOperationException("No screen found.");
+        _snapshot = new Drawing.Bitmap(_bounds.Width, _bounds.Height, PixelFormat.Format32bppArgb);
         using (var graphics = Drawing.Graphics.FromImage(_snapshot))
-            graphics.CopyFromScreen(bounds.Location, Drawing.Point.Empty, bounds.Size, Drawing.CopyPixelOperation.SourceCopy);
+            graphics.CopyFromScreen(_bounds.Location, Drawing.Point.Empty, _bounds.Size, Drawing.CopyPixelOperation.SourceCopy);
 
         var image = new System.Windows.Controls.Image { Source = ToBitmapSource(_snapshot), Stretch = Stretch.Fill,
             IsHitTestVisible = false };
@@ -114,8 +116,31 @@ internal sealed class OverlayWindow : Window
         _canvas.MouseLeftButtonUp += OnCanvasMouseUp;
         PreviewKeyDown += KeyPressed;
         Closed += (_, _) => _snapshot.Dispose();
+        SourceInitialized += (_, _) => CoverVirtualScreen();
         Loaded += (_, _) => Focus();
     }
+
+    // A maximized window only fills one monitor, so the overlay is placed over the virtual desktop in physical
+    // pixels. Windows would otherwise send WM_DPICHANGED when the window lands mostly on a monitor with another
+    // scale, and WPF would shrink or grow it to match; the screenshot is stretched to the window, so the original
+    // DPI is kept and pixels still map 1:1.
+    private void CoverVirtualScreen()
+    {
+        var source = (System.Windows.Interop.HwndSource)PresentationSource.FromVisual(this)!;
+        source.AddHook((IntPtr _, int message, IntPtr _, IntPtr _, ref bool handled) =>
+        {
+            if (message == WmDpiChanged) handled = true;
+            return IntPtr.Zero;
+        });
+        SetWindowPos(source.Handle, HwndTopmost, _bounds.X, _bounds.Y, _bounds.Width, _bounds.Height, SwpNoActivate);
+    }
+
+    private const int WmDpiChanged = 0x02E0;
+    private static readonly IntPtr HwndTopmost = new(-1);
+    private const uint SwpNoActivate = 0x0010;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
 
     // Copies the pixels straight into a WPF bitmap (Format32bppArgb is BGRA in memory). Avoids a PNG
     // encode/decode of the whole screen, so the overlay opens faster and uses less memory.
@@ -421,16 +446,36 @@ internal sealed class OverlayWindow : Window
         Math.Clamp(p.X, _selected.Left, _selected.Right),
         Math.Clamp(p.Y, _selected.Top, _selected.Bottom));
 
+    // Keeps the toolbar on the monitor that holds most of the selection, so it never lands in the parts of the
+    // virtual desktop that no monitor shows (e.g. below a shorter screen) or straddles two screens.
     private void PlaceToolbar()
     {
         _toolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         double w = _toolbar.DesiredSize.Width;
         double h = _toolbar.DesiredSize.Height;
-        Canvas.SetLeft(_toolbar, Math.Clamp(_selected.Left, 0, Math.Max(0, _canvas.ActualWidth - w)));
+        Rect area = SelectionMonitor();
+        Canvas.SetLeft(_toolbar, Math.Clamp(_selected.Left, area.Left, Math.Max(area.Left, area.Right - w)));
         double y = _selected.Bottom + 9;
-        if (y + h > _canvas.ActualHeight) y = _selected.Top - h - 9;
-        Canvas.SetTop(_toolbar, Math.Clamp(y, 0, Math.Max(0, _canvas.ActualHeight - h)));
+        if (y + h > area.Bottom) y = _selected.Top - h - 9;
+        Canvas.SetTop(_toolbar, Math.Clamp(y, area.Top, Math.Max(area.Top, area.Bottom - h)));
         _toolbar.Visibility = Visibility.Visible;
+    }
+
+    private Rect SelectionMonitor()
+    {
+        double xScale = _snapshot.Width / _canvas.ActualWidth;
+        double yScale = _snapshot.Height / _canvas.ActualHeight;
+        Rect best = new(0, 0, _canvas.ActualWidth, _canvas.ActualHeight);
+        double bestArea = -1;
+        foreach (var screen in Forms.Screen.AllScreens)
+        {
+            var b = screen.Bounds;
+            var monitor = new Rect((b.X - _bounds.X) / xScale, (b.Y - _bounds.Y) / yScale, b.Width / xScale, b.Height / yScale);
+            var overlap = Rect.Intersect(monitor, _selected);
+            double area = overlap.IsEmpty ? 0 : overlap.Width * overlap.Height;
+            if (area > bestArea) { best = monitor; bestArea = area; }
+        }
+        return best;
     }
 
     private void BeginText(Point p)
