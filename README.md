@@ -103,7 +103,7 @@ cd linux && QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests
 
 ## Status
 
-As of October 2026 (v0.8.0): the Windows build compiles on GitHub's Windows runners and is being tested by hand. The Linux app passes automated tests on every build (capture, copy, OCR in English and Spanish on X11, and the Wayland portal protocol), but has not yet been tried on a real KDE or Cinnamon desktop. Known limits: on Windows the capture covers every monitor and a selection can span several (not yet tried by hand on mixed-scaling setups); on Linux every monitor is captured, but a selection stays within one monitor, and mixed per-monitor scaling on Wayland may be slightly off. Windows OCR can fail on protected content or without the language packs.
+As of October 2026 (v0.8.0): the Windows build compiles on GitHub's Windows runners and is being tested by hand. The Linux app passes automated tests on every build (capture, copy, OCR in English and Spanish on X11, and the Wayland portal protocol), but has not yet been tried on a real KDE or Cinnamon desktop. Known limits: on Windows the capture covers every monitor and a selection can span several (tried by hand on two monitors in v0.8.2; mixed per-monitor scaling not yet tried); on Linux every monitor is captured, but a selection stays within one monitor, and mixed per-monitor scaling on Wayland may be slightly off. Windows OCR can fail on protected content or without the language packs.
 
 ## Third-party code
 
