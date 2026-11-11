@@ -28,7 +28,10 @@ internal sealed class DshotApp : System.Windows.Application
     private RegisteredWaitHandle? _captureRequestWait;
     private HwndSource? _hotkeyWindow;
     private Forms.NotifyIcon? _tray;
-    private OverlayWindow? _overlay;
+    // One capture = one overlay per monitor, each showing that monitor's frozen pixels.
+    private readonly List<OverlayWindow> _overlays = new();
+    private readonly List<Bitmap> _snapshots = new();
+    private bool _endingCapture;
     private bool _hotkeyRegistered;
     private bool _printScreenRegistered;
     private PrintScreenHook? _printScreenHook;
@@ -136,24 +139,54 @@ internal sealed class DshotApp : System.Windows.Application
 
     private void Capture()
     {
-        if (_overlay is not null) return;
+        if (_overlays.Count > 0 || _snapshots.Count > 0) return;
         try
         {
-            _overlay = new OverlayWindow();
-            _overlay.Closed += (_, _) =>
+            // Read every monitor before the first overlay appears, so no overlay ends up in a snapshot.
+            var screens = Forms.Screen.AllScreens;
+            if (screens.Length == 0) throw new InvalidOperationException("No screen found.");
+            foreach (var screen in screens) _snapshots.Add(OverlayWindow.Grab(screen.Bounds));
+            for (int i = 0; i < screens.Length; i++)
             {
-                _overlay = null;
-                // A capture holds several full-screen bitmaps; release them now so the idle tray app stays small.
-                GC.Collect();
-            };
-            _overlay.Show();
-            _overlay.Activate();
+                var overlay = new OverlayWindow(screens[i].Bounds, _snapshots[i]);
+                overlay.Closed += (_, _) => EndCapture(overlay); // Copy, save, OCR or Esc on any monitor ends the capture.
+                overlay.SelectionStarted += OnSelectionStarted;
+                _overlays.Add(overlay);
+            }
+            foreach (var overlay in _overlays) overlay.Show();
+            // Keyboard focus goes to the monitor under the mouse, so Esc and the shortcuts work straight away.
+            var cursor = Forms.Cursor.Position;
+            (_overlays.Find(o => o.ScreenBounds.Contains(cursor)) ?? _overlays[0]).Activate();
         }
         catch (Exception ex)
         {
-            _overlay = null;
+            EndCapture(null);
             MessageBox.Show($"Capture failed: {ex.Message}", "dshot", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    // A capture holds one region: starting a selection on one monitor drops the one on another.
+    private void OnSelectionStarted(OverlayWindow owner)
+    {
+        foreach (var overlay in _overlays)
+            if (!ReferenceEquals(overlay, owner) && overlay.HasRegion) overlay.ClearSelection();
+    }
+
+    private void EndCapture(OverlayWindow? closed)
+    {
+        if (_endingCapture) return; // Closing the other overlays below raises Closed again.
+        _endingCapture = true;
+        try
+        {
+            foreach (var overlay in _overlays.ToArray())
+                if (!ReferenceEquals(overlay, closed)) overlay.Close();
+            _overlays.Clear();
+            foreach (var snapshot in _snapshots) snapshot.Dispose();
+            _snapshots.Clear();
+            // A capture holds full-screen bitmaps for every monitor; release them now so the idle tray app stays small.
+            GC.Collect();
+        }
+        finally { _endingCapture = false; }
     }
 
     private IntPtr HotkeyHook(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)

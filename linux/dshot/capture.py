@@ -41,7 +41,7 @@ def grab_screens() -> list[ScreenShot]:
         image = screen.grabWindow(0).toImage()
         if image.isNull():
             raise CaptureError(f"Could not read screen {screen.name()}.")
-        shots.append(ScreenShot(screen, screen.geometry(), image))
+        shots.append(ScreenShot(screen, screen.geometry(), opaque(image)))
     return shots
 
 
@@ -52,8 +52,19 @@ def split_virtual_desktop(full: QImage, screens: list[QScreen]) -> list[ScreenSh
     """
     crops = crop_rects(full.width(), full.height(), [screen.geometry() for screen in screens])
     # A single screen is the whole image: use it as is instead of copying every pixel.
-    return [ScreenShot(screen, screen.geometry(), full if crop == full.rect() else full.copy(crop))
+    return [ScreenShot(screen, screen.geometry(), opaque(full if crop == full.rect() else full.copy(crop)))
             for screen, crop in zip(screens, crops)]
+
+
+def opaque(image: QImage) -> QImage:
+    """The image in the format Qt paints fastest.
+
+    Portal screenshots are PNG files that often load with an (unused) alpha channel; painting those
+    converts every pixel on each repaint. Screen pixels are opaque, so convert once up front.
+    """
+    if image.format() == QImage.Format.Format_RGB32:
+        return image
+    return image.convertToFormat(QImage.Format.Format_RGB32)
 
 
 def crop_rects(width: int, height: int, geometries: list[QRect]) -> list[QRect]:

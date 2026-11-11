@@ -37,7 +37,8 @@ internal sealed class OverlayWindow : Window
         public UIElement? Visual { get; set; }
     }
 
-    private readonly Drawing.Bitmap _snapshot;
+    private readonly Drawing.Bitmap _snapshot; // Owned by the capture session, which disposes it.
+    private readonly Drawing.Rectangle _bounds; // The monitor this overlay covers, in physical pixels.
     private readonly Canvas _canvas = new() { Background = Brushes.Transparent, ClipToBounds = true };
     private readonly Border _toolbar = new();
     // Lightshot-style selection: a white edge with a dark inner line, readable on light and dark content.
@@ -76,29 +77,48 @@ internal sealed class OverlayWindow : Window
     // A region is ready once the first selection is accepted; annotation modes replace Select from then on.
     private bool HasSelection => _mode != EditMode.Select;
 
-    public OverlayWindow()
+    /// <summary>Raised when a region drag starts here, so overlays on other monitors drop their selection.</summary>
+    public event Action<OverlayWindow>? SelectionStarted;
+
+    public Drawing.Rectangle ScreenBounds => _bounds;
+    public bool HasRegion => !_selected.IsEmpty;
+
+    /// <summary>Copies one monitor's pixels. Call for every monitor before any overlay is shown, so
+    /// exported files never include dshot's own windows.</summary>
+    public static Drawing.Bitmap Grab(Drawing.Rectangle bounds)
     {
+        var bitmap = new Drawing.Bitmap(bounds.Width, bounds.Height, SnapshotFormat);
+        try
+        {
+            using var graphics = Drawing.Graphics.FromImage(bitmap);
+            graphics.CopyFromScreen(bounds.Location, Drawing.Point.Empty, bounds.Size, Drawing.CopyPixelOperation.SourceCopy);
+            return bitmap;
+        }
+        catch { bitmap.Dispose(); throw; }
+    }
+
+    /// <summary>One overlay per monitor: it shows that monitor's frozen pixels and covers exactly that monitor.</summary>
+    public OverlayWindow(Drawing.Rectangle bounds, Drawing.Bitmap snapshot)
+    {
+        _bounds = bounds;
+        _snapshot = snapshot;
         Title = "dshot";
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
-        WindowState = WindowState.Maximized;
+        WindowStartupLocation = WindowStartupLocation.Manual; // Placed in physical pixels by FitToScreen.
         ShowInTaskbar = false;
+        ShowActivated = false; // The session activates the overlay under the mouse.
         Topmost = true;
         Background = Brushes.Black;
         Focusable = true;
 
-        // Grab pixels before opening any overlay; exported files never include dshot controls.
-        var screen = Forms.Screen.PrimaryScreen ?? throw new InvalidOperationException("No primary screen found.");
-        var bounds = screen.Bounds;
-        _snapshot = new Drawing.Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
-        using (var graphics = Drawing.Graphics.FromImage(_snapshot))
-            graphics.CopyFromScreen(bounds.Location, Drawing.Point.Empty, bounds.Size, Drawing.CopyPixelOperation.SourceCopy);
-
         var image = new System.Windows.Controls.Image { Source = ToBitmapSource(_snapshot), Stretch = Stretch.Fill,
             IsHitTestVisible = false };
+        // The window is exactly as large as the snapshot, so pixels map 1:1: no filtering, no blur.
+        RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.NearestNeighbor);
         var dim = new System.Windows.Shapes.Path
         {
-            Fill = new SolidColorBrush(MediaColor.FromArgb(110, 0, 0, 0)),
+            Fill = DimBrush,
             Data = new GeometryGroup { FillRule = FillRule.EvenOdd, Children = { _dimArea, _dimHole } },
             IsHitTestVisible = false
         };
@@ -116,8 +136,7 @@ internal sealed class OverlayWindow : Window
         _canvas.MouseMove += OnCanvasMouseMove;
         _canvas.MouseLeftButtonUp += OnCanvasMouseUp;
         PreviewKeyDown += KeyPressed;
-        Closed += (_, _) => _snapshot.Dispose();
-        Loaded += (_, _) => Focus();
+        Loaded += (_, _) => { FitToScreen(); Focus(); };
     }
 
     // Windows animates new windows in (a fade/zoom of a few hundred ms), which makes the capture feel slow
@@ -127,7 +146,40 @@ internal sealed class OverlayWindow : Window
         base.OnSourceInitialized(e);
         int disabled = 1;
         DwmSetWindowAttribute(new WindowInteropHelper(this).Handle, DwmwaTransitionsForceDisabled, ref disabled, sizeof(int));
+        FitToScreen();
     }
+
+    // Moving onto a monitor with another scale makes Windows resize the window; put it back on its monitor.
+    protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
+    {
+        base.OnDpiChanged(oldDpi, newDpi);
+        Dispatcher.BeginInvoke(FitToScreen);
+    }
+
+    // Covers this overlay's monitor exactly. The process is per-monitor DPI aware, so SetWindowPos takes
+    // physical pixels, the same units as Screen.Bounds and the snapshot. WPF's own Left/Top/Width/Height
+    // are in scaled units that differ per monitor, so they are not used.
+    private void FitToScreen()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+        // Retried: when the move crosses to a monitor with another scale, the first call's size is rescaled.
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            if (GetWindowRect(handle, out var r) && r.Left == _bounds.Left && r.Top == _bounds.Top &&
+                r.Right == _bounds.Right && r.Bottom == _bounds.Bottom) return;
+            SetWindowPos(handle, HwndTopmost, _bounds.X, _bounds.Y, _bounds.Width, _bounds.Height, SwpNoActivate);
+        }
+    }
+
+    private static readonly IntPtr HwndTopmost = new(-1);
+    private const uint SwpNoActivate = 0x0010;
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
 
     private const int DwmwaTransitionsForceDisabled = 3;
     [DllImport("dwmapi.dll")]
@@ -136,15 +188,19 @@ internal sealed class OverlayWindow : Window
     /// <summary>Does the one-time setup (toolbar template parse) ahead of the first capture.</summary>
     public static void Prepare() => RuntimeHelpers.RunClassConstructor(typeof(OverlayWindow).TypeHandle);
 
-    // Copies the pixels straight into a WPF bitmap (Format32bppArgb is BGRA in memory). Avoids a PNG
+    // Screen pixels are opaque, so snapshots and exports carry no alpha channel. WPF draws Bgr32 as is
+    // (Bgra32 would be converted to premultiplied alpha first: one more full-screen pass and copy).
+    private const PixelFormat SnapshotFormat = PixelFormat.Format32bppRgb;
+
+    // Copies the pixels straight into a WPF bitmap (Format32bppRgb is BGRX in memory). Avoids a PNG
     // encode/decode of the whole screen, so the overlay opens faster and uses less memory.
     private static BitmapSource ToBitmapSource(Drawing.Bitmap bitmap)
     {
         var data = bitmap.LockBits(new Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height),
-            ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            ImageLockMode.ReadOnly, SnapshotFormat);
         try
         {
-            var source = BitmapSource.Create(bitmap.Width, bitmap.Height, 96, 96, PixelFormats.Bgra32, null,
+            var source = BitmapSource.Create(bitmap.Width, bitmap.Height, 96, 96, PixelFormats.Bgr32, null,
                 data.Scan0, data.Stride * bitmap.Height, data.Stride);
             source.Freeze();
             return source;
@@ -166,7 +222,18 @@ internal sealed class OverlayWindow : Window
         public const string Close = "M4,4 L12,12 M12,4 L4,12";
     }
 
-    private static readonly Brush ActiveToolBrush = new SolidColorBrush(MediaColor.FromRgb(74, 80, 90));
+    // Frozen brushes are shared by every overlay and skip WPF's change tracking.
+    private static Brush Frozen(MediaColor color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
+    }
+
+    private static readonly Brush ActiveToolBrush = Frozen(MediaColor.FromRgb(74, 80, 90));
+    private static readonly Brush DimBrush = Frozen(MediaColor.FromArgb(110, 0, 0, 0));
+    private static readonly Brush ToolbarBrush = Frozen(MediaColor.FromRgb(31, 34, 42));
+    private static readonly Brush ToolbarEdgeBrush = Frozen(MediaColor.FromRgb(90, 96, 105));
     private static readonly ControlTemplate ToolTemplate = (ControlTemplate)System.Windows.Markup.XamlReader.Parse(
         "<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' " +
         "xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='Button'>" +
@@ -201,8 +268,8 @@ internal sealed class OverlayWindow : Window
         AddTool(row, ToolIcon(Icons.Close), "Close (Esc)", Close);
 
         _toolbar.Child = row;
-        _toolbar.Background = new SolidColorBrush(MediaColor.FromRgb(31, 34, 42));
-        _toolbar.BorderBrush = new SolidColorBrush(MediaColor.FromRgb(90, 96, 105));
+        _toolbar.Background = ToolbarBrush;
+        _toolbar.BorderBrush = ToolbarEdgeBrush;
         _toolbar.BorderThickness = new Thickness(1);
         _toolbar.CornerRadius = new CornerRadius(7);
         _toolbar.Padding = new Thickness(3);
@@ -240,7 +307,7 @@ internal sealed class OverlayWindow : Window
     private static void AddSeparator(Panel panel) => panel.Children.Add(new Border
     {
         Width = 1, Height = 18, Margin = new Thickness(4, 0, 4, 0), VerticalAlignment = VerticalAlignment.Center,
-        Background = new SolidColorBrush(MediaColor.FromRgb(74, 80, 90))
+        Background = ActiveToolBrush
     });
 
     // Highlights the active drawing tool so it is clear what a drag on the screenshot will do.
@@ -305,6 +372,7 @@ internal sealed class OverlayWindow : Window
         var p = e.GetPosition(_canvas);
         if (_mode == EditMode.Select)
         {
+            SelectionStarted?.Invoke(this);
             _start = p;
             _dragging = true;
             _toolbar.Visibility = Visibility.Collapsed;
@@ -497,6 +565,35 @@ internal sealed class OverlayWindow : Window
         _marks.Add(mark);
     }
 
+    /// <summary>Back to the initial state: no region, no annotations. Used when the user starts selecting on
+    /// another monitor, since a capture holds one region at a time.</summary>
+    public void ClearSelection()
+    {
+        if (_textEdit is not null)
+        {
+            var box = _textEdit;
+            _textEdit = null; // Cleared first so the box's focus loss does not commit it.
+            _canvas.Children.Remove(box);
+        }
+        if (_dragging)
+        {
+            _dragging = false;
+            _canvas.ReleaseMouseCapture();
+        }
+        if (_activeMark?.Visual is not null) _canvas.Children.Remove(_activeMark.Visual);
+        _activeMark = null;
+        foreach (var mark in _marks)
+            if (mark.Visual is not null) _canvas.Children.Remove(mark.Visual);
+        foreach (var head in _arrowheads.Values) _canvas.Children.Remove(head);
+        _marks.Clear();
+        _arrowheads.Clear();
+        SetMode(EditMode.Select);
+        _selected = Rect.Empty;
+        _dimHole.Rect = Rect.Empty;
+        _selection.Visibility = Visibility.Collapsed;
+        _toolbar.Visibility = Visibility.Collapsed;
+    }
+
     private void Undo()
     {
         if (_marks.Count == 0) return;
@@ -515,10 +612,16 @@ internal sealed class OverlayWindow : Window
         int y = Math.Clamp((int)Math.Floor(_selected.Top * yScale), 0, _snapshot.Height - 1);
         int w = Math.Clamp((int)Math.Ceiling(_selected.Width * xScale), 1, _snapshot.Width - x);
         int h = Math.Clamp((int)Math.Ceiling(_selected.Height * yScale), 1, _snapshot.Height - y);
-        var output = new Drawing.Bitmap(w, h, PixelFormat.Format32bppArgb);
+        var output = new Drawing.Bitmap(w, h, SnapshotFormat);
         using var graphics = Drawing.Graphics.FromImage(output);
+        // A plain 1:1 copy of the region: no blending or resampling needed.
+        graphics.CompositingMode = Drawing2D.CompositingMode.SourceCopy;
+        graphics.InterpolationMode = Drawing2D.InterpolationMode.NearestNeighbor;
+        graphics.PixelOffsetMode = Drawing2D.PixelOffsetMode.Half;
         graphics.DrawImage(_snapshot, new Drawing.Rectangle(0, 0, w, h),
             new Drawing.Rectangle(x, y, w, h), Drawing.GraphicsUnit.Pixel);
+        graphics.CompositingMode = Drawing2D.CompositingMode.SourceOver;
+        graphics.PixelOffsetMode = Drawing2D.PixelOffsetMode.Default;
         if (!annotations) return output;
         graphics.SmoothingMode = Drawing2D.SmoothingMode.AntiAlias;
         graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;

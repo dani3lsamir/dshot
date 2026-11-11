@@ -188,6 +188,8 @@ class OverlayWindow(QWidget):
         self.shot = shot
         self.setWindowTitle("dshot")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # paintEvent covers every pixel with the screenshot, so Qt need not clear the area first.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)

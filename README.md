@@ -30,7 +30,7 @@ Out of scope by design: recording, GIFs, scrolling capture, uploads or share lin
 ## Usage
 
 1. Start `dshot.exe`. It stays in the system tray.
-2. Start a capture (see above) and drag over the area you want, on the **primary monitor**.
+2. Start a capture (see above) and drag over the area you want, on **any monitor**: every connected monitor is captured. A selection stays within one monitor.
 3. Annotate with the toolbar (hover an icon for its name), then copy, save or OCR.
 
 | Key | Action |
@@ -103,7 +103,7 @@ cd linux && QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests
 
 ## Status
 
-As of October 2026 (v0.8.0): the Windows build compiles on GitHub's Windows runners and is being tested by hand. The Linux app passes automated tests on every build (capture, copy, OCR in English and Spanish on X11, and the Wayland portal protocol), but has not yet been tried on a real KDE or Cinnamon desktop. Known limits: on Windows, capture covers the primary monitor only; on Linux every monitor is captured, but a selection stays within one monitor, and mixed per-monitor scaling on Wayland may be slightly off. Windows OCR can fail on protected content or without the language packs.
+As of October 2026 (v0.8.0): the Windows build compiles on GitHub's Windows runners and is being tested by hand. The Linux app passes automated tests on every build (capture, copy, OCR in English and Spanish on X11, and the Wayland portal protocol), but has not yet been tried on a real KDE or Cinnamon desktop. Known limits: every monitor is captured on both systems, but a selection stays within one monitor; multi-monitor capture on Windows compiles and is still to be confirmed by hand on a multi-monitor PC; on Linux, mixed per-monitor scaling on Wayland may be slightly off. Windows OCR can fail on protected content or without the language packs.
 
 ## Third-party code
 

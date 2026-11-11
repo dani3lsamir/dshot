@@ -63,6 +63,14 @@ class GeometryTests(unittest.TestCase):
         shots = split_virtual_desktop(full, [screen])
         self.assertEqual(shots[0].image.cacheKey(), full.cacheKey())
 
+    def test_portal_image_is_made_opaque_for_fast_painting(self):
+        screen = QGuiApplication.primaryScreen()
+        full = QImage(screen.geometry().size(), QImage.Format.Format_ARGB32)  # As loaded from a PNG.
+        full.fill(QColor("#2d6cdf"))
+        shot = split_virtual_desktop(full, [screen])[0]
+        self.assertEqual(shot.image.format(), QImage.Format.Format_RGB32)
+        self.assertEqual(QColor(shot.image.pixel(5, 5)), QColor("#2d6cdf"))
+
     def test_compose_crops_at_device_resolution_with_marks(self):
         # Screen shown at 400x200 logical, captured at 2x (800x400 pixels), solid blue.
         shot = QImage(800, 400, QImage.Format.Format_RGB32)
@@ -114,6 +122,31 @@ class OverlayTests(unittest.TestCase):
         overlay.undo()
         self.assertEqual(overlay.marks, [])
         session.close()
+
+    def test_selecting_on_another_monitor_clears_the_first(self):
+        screen = QGuiApplication.primaryScreen()
+        shots = []
+        for color in ("#2d6cdf", "#df2d2d"):  # Two monitors.
+            image = QImage(screen.geometry().size(), QImage.Format.Format_RGB32)
+            image.fill(QColor(color))
+            shots.append(ScreenShot(screen, screen.geometry(), image))
+        session = CaptureSession(shots)
+        first, second = session.overlays
+        first.selection = QRectF(10, 10, 200, 100)
+        first.set_tool(Tool.RECTANGLE)
+        first.marks.append(Mark(Tool.RECTANGLE, QColor("red"), [QPointF(20, 20), QPointF(60, 60)]))
+        press = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(50, 50), QPointF(50, 50), Qt.MouseButton.LeftButton,
+                            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        second.mousePressEvent(press)
+        self.assertTrue(first.selection.isEmpty())
+        self.assertEqual(first.marks, [])
+        self.assertIs(first.tool, Tool.SELECT)
+        # The export comes from the monitor that holds the selection.
+        second.selection = QRectF(0, 0, 40, 30)
+        second.set_tool(Tool.RECTANGLE)
+        second.copy_image()
+        self.assertEqual(QColor(QGuiApplication.clipboard().image().pixel(5, 5)), QColor("#df2d2d"))
+        self.assertEqual(session.overlays, [])  # Closing one overlay ends the capture on every monitor.
 
     def test_drag_repaints_only_around_the_selection(self):
         session = self.make_session()
