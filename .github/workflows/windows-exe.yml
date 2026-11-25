@@ -113,5 +113,12 @@ jobs:
             [ -s section.md ] && cat section.md >> notes.md
           fi
           cat footer.md >> notes.md
-          gh release create "$TAG" artifacts/dshot-Windows-x64/dshot.exe artifacts/dshot-Linux/dshot-linux.tar.gz \
-            --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "dshot $TAG" --notes-file notes.md
+          # Idempotent: update the release if it already exists for this tag, otherwise create it.
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "${{ github.repository }}" --title "dshot $TAG" --notes-file notes.md
+            gh release upload "$TAG" artifacts/dshot-Windows-x64/dshot.exe artifacts/dshot-Linux/dshot-linux.tar.gz \
+              --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$TAG" artifacts/dshot-Windows-x64/dshot.exe artifacts/dshot-Linux/dshot-linux.tar.gz \
+              --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "dshot $TAG" --notes-file notes.md
+          fi
