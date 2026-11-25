@@ -80,6 +80,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
       - name: Download build outputs
         uses: actions/download-artifact@v4
         with:
@@ -89,7 +91,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
-          cat > notes.md <<'EOF'
+          # Download and runtime instructions appended to every release.
+          cat > footer.md <<'EOF'
+
+          ---
+
           **Windows 10/11 x64:** download `dshot.exe` (portable, ~26 MB). Needs the Microsoft Windows Desktop Runtime 8 or newer (x64). The exe is unsigned, so SmartScreen may warn: choose *More info > Run anyway*.
 
           **Linux (CachyOS/Arch, Linux Mint/Ubuntu):** download `dshot-linux.tar.gz`, then:
@@ -100,5 +106,12 @@ jobs:
 
           Capture with Print Screen (after the installer binds it) or a left click on the tray icon. OCR supports English and Spanish.
           EOF
+          # Use the CHANGELOG.md section for this tag (e.g. "## v0.9.0") as the release body, if present.
+          : > notes.md
+          if [ -f CHANGELOG.md ]; then
+            awk -v tag="## $TAG" '$0==tag{f=1;next} f&&/^## /{exit} f{print}' CHANGELOG.md > section.md || true
+            [ -s section.md ] && cat section.md >> notes.md
+          fi
+          cat footer.md >> notes.md
           gh release create "$TAG" artifacts/dshot-Windows-x64/dshot.exe artifacts/dshot-Linux/dshot-linux.tar.gz \
             --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "dshot $TAG" --notes-file notes.md
