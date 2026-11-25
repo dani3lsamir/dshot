@@ -55,6 +55,7 @@ class DshotApp(QObject):
         self._server = server
         self._server.newConnection.connect(self._on_connection)
         self._session: CaptureSession | None = None
+        self._capturing = False  # Guards the gap between grab_screens() and the session being set.
 
         self.tray = QSystemTrayIcon(icons.app_icon(light=True))
         self.tray.setToolTip("dshot - click to capture")
@@ -66,6 +67,7 @@ class DshotApp(QObject):
         startup.setChecked(startup_enabled())
         startup.toggled.connect(self._toggle_startup)
         menu.addAction(startup)
+        self._startup_action = startup
         menu.addSeparator()
         quit_action = QAction("Exit", menu)
         quit_action.triggered.connect(QApplication.quit)
@@ -88,15 +90,22 @@ class DshotApp(QObject):
         try:
             set_startup(enabled)
         except OSError as exc:
+            # Put the checkbox back to the real state without re-triggering this handler.
+            self._startup_action.blockSignals(True)
+            self._startup_action.setChecked(startup_enabled())
+            self._startup_action.blockSignals(False)
             QMessageBox.warning(None, "Start at login", str(exc))
 
     def _on_connection(self) -> None:
         while self._server.hasPendingConnections():
             socket = self._server.nextPendingConnection()
-            if socket.bytesAvailable() == 0:
-                socket.waitForReadyRead(1000)
-            command = bytes(socket.readAll()).decode(errors="replace").strip()
-            socket.disconnectFromServer()
+            try:
+                if socket.bytesAvailable() == 0:
+                    socket.waitForReadyRead(250)
+                command = bytes(socket.readAll()).decode(errors="replace").strip()
+                socket.disconnectFromServer()
+            finally:
+                socket.deleteLater()  # Otherwise one QLocalSocket leaks per capture request.
             if command == "quit":
                 QApplication.quit()
             else:
@@ -106,13 +115,16 @@ class DshotApp(QObject):
         QTimer.singleShot(delay_ms, self.capture)
 
     def capture(self) -> None:
-        if self._session is not None:
+        if self._session is not None or self._capturing:
             return
+        self._capturing = True
         try:
             shots = grab_screens()
         except CaptureError as exc:
             self.notify("Capture failed", str(exc))
             return
+        finally:
+            self._capturing = False
         self._session = CaptureSession(shots)
         self._session.notification.connect(self.notify)
         self._session.finished.connect(self._on_session_finished)
@@ -148,11 +160,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.quit:
         return 0
     path = socket_path()
-    QLocalServer.removeServer(path)  # Clears a stale socket left by a crash.
     server = QLocalServer()
+    # Try to listen first; only clear the socket path if that fails (a stale socket left by a
+    # crash), so we never remove the socket of another instance that is actually alive.
     if not server.listen(path):
-        print(f"dshot: cannot listen on {path}: {server.errorString()}", file=sys.stderr)
-        return 1
+        QLocalServer.removeServer(path)
+        if not server.listen(path):
+            print(f"dshot: cannot listen on {path}: {server.errorString()}", file=sys.stderr)
+            return 1
+    app.aboutToQuit.connect(server.close)
     dshot = DshotApp(server)
     if args.capture:
         dshot.request_capture()

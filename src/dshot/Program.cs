@@ -21,13 +21,14 @@ internal sealed class DshotApp : System.Windows.Application
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunEntry = "dshot";
     private const string CaptureRequestEvent = "Local\\dshotCaptureRequest";
+    // Capturing straight from the tray menu would photograph the closing menu; wait for it to vanish first.
+    private const int MenuCaptureDelayMs = 180;
 
-    private readonly System.Threading.Mutex _mutex;
-    private readonly bool _firstInstance;
     private readonly EventWaitHandle _captureRequest;
     private RegisteredWaitHandle? _captureRequestWait;
     private HwndSource? _hotkeyWindow;
     private Forms.NotifyIcon? _tray;
+    private Forms.ContextMenuStrip? _trayMenu;
     // One capture = one overlay per monitor, each showing that monitor's frozen pixels.
     private readonly List<OverlayWindow> _overlays = new();
     private readonly List<Bitmap> _snapshots = new();
@@ -36,10 +37,8 @@ internal sealed class DshotApp : System.Windows.Application
     private bool _printScreenRegistered;
     private PrintScreenHook? _printScreenHook;
 
-    private DshotApp(System.Threading.Mutex mutex, bool firstInstance, EventWaitHandle captureRequest)
+    private DshotApp(EventWaitHandle captureRequest)
     {
-        _mutex = mutex;
-        _firstInstance = firstInstance;
         _captureRequest = captureRequest;
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
     }
@@ -65,7 +64,7 @@ internal sealed class DshotApp : System.Windows.Application
         }
 
         using var captureRequest = new EventWaitHandle(false, EventResetMode.AutoReset, CaptureRequestEvent);
-        try { new DshotApp(mutex, first, captureRequest).Run(); }
+        try { new DshotApp(captureRequest).Run(); }
         finally { mutex.ReleaseMutex(); mutex.Dispose(); }
     }
 
@@ -89,7 +88,8 @@ internal sealed class DshotApp : System.Windows.Application
             _printScreenRegistered = RegisterHotKey(_hotkeyWindow.Handle, PrintScreenHotkeyId, ModNoRepeat, KeyPrintScreen);
 
         var menu = new Forms.ContextMenuStrip();
-        menu.Items.Add("Capture (Print Screen / Ctrl + Alt + S)", null, (_, _) => Dispatcher.BeginInvoke(Capture));
+        _trayMenu = menu;
+        menu.Items.Add("Capture (Print Screen / Ctrl + Alt + S)", null, (_, _) => RequestCapture(MenuCaptureDelayMs));
         var startupItem = new Forms.ToolStripMenuItem("Start with Windows") { Checked = IsStartupEnabled(), CheckOnClick = true };
         startupItem.Click += (_, _) =>
         {
@@ -137,6 +137,15 @@ internal sealed class DshotApp : System.Windows.Application
         }
     }
 
+    // Captures now, or after a short delay (used by the tray menu so it is gone before the grab).
+    private void RequestCapture(int delayMs)
+    {
+        if (delayMs <= 0) { Dispatcher.BeginInvoke(Capture); return; }
+        var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(delayMs) };
+        timer.Tick += (_, _) => { timer.Stop(); Capture(); };
+        timer.Start();
+    }
+
     private void Capture()
     {
         if (_overlays.Count > 0 || _snapshots.Count > 0) return;
@@ -151,6 +160,13 @@ internal sealed class DshotApp : System.Windows.Application
                 var overlay = new OverlayWindow(screens[i].Bounds, _snapshots[i]);
                 overlay.Closed += (_, _) => EndCapture(overlay); // Copy, save, OCR or Esc on any monitor ends the capture.
                 overlay.SelectionStarted += OnSelectionStarted;
+                // Save hides every overlay for its file dialog; OCR shows a tray notification like Linux.
+                overlay.VisibilityRequested += visible =>
+                {
+                    foreach (var o in _overlays) { if (visible) o.Show(); else o.Hide(); }
+                    if (visible) overlay.Activate();
+                };
+                overlay.NotificationRequested += ShowNotification;
                 _overlays.Add(overlay);
             }
             foreach (var overlay in _overlays) overlay.Show();
@@ -170,7 +186,11 @@ internal sealed class DshotApp : System.Windows.Application
     {
         foreach (var overlay in _overlays)
             if (!ReferenceEquals(overlay, owner) && overlay.HasRegion) overlay.ClearSelection();
+        owner.Activate(); // Keep keyboard focus on the monitor the user is drawing on.
     }
+
+    private void ShowNotification(string title, string message) =>
+        _tray?.ShowBalloonTip(4000, title, message, Forms.ToolTipIcon.Info);
 
     private void EndCapture(OverlayWindow? closed)
     {
@@ -241,7 +261,8 @@ internal sealed class DshotApp : System.Windows.Application
         if (_hotkeyRegistered && _hotkeyWindow is not null) UnregisterHotKey(_hotkeyWindow.Handle, HotkeyId);
         if (_printScreenRegistered && _hotkeyWindow is not null) UnregisterHotKey(_hotkeyWindow.Handle, PrintScreenHotkeyId);
         _hotkeyWindow?.Dispose();
-        if (_tray is not null) { _tray.Visible = false; _tray.Dispose(); }
+        if (_tray is not null) { _tray.Visible = false; _tray.Icon?.Dispose(); _tray.Dispose(); }
+        _trayMenu?.Dispose();
         base.OnExit(e);
     }
 

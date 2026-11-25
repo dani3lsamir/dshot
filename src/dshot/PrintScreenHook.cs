@@ -17,7 +17,9 @@ internal sealed class PrintScreenHook : IDisposable
 {
     private const int WhKeyboardLl = 13;
     private const int WmKeyDown = 0x0100;
+    private const int WmKeyUp = 0x0101;
     private const int WmSysKeyDown = 0x0104;
+    private const int WmSysKeyUp = 0x0105;
     private const uint WmQuit = 0x0012;
     private const uint VkSnapshot = 0x2C;
     private static readonly int[] Modifiers = { 0x10, 0x11, 0x12, 0x5B, 0x5C }; // Shift, Ctrl, Alt, LWin, RWin
@@ -26,6 +28,10 @@ internal sealed class PrintScreenHook : IDisposable
     private readonly LowLevelKeyboardProc _proc; // Kept in a field so the GC never frees the native callback.
     private IntPtr _hook;
     private uint _threadId;
+    private Thread? _thread;
+    // True from the moment we swallow a plain Print Screen key-down until its key-up: it ignores the
+    // auto-repeat key-downs while the key is held, and swallows the matching key-up as a pair.
+    private bool _swallowKeyUp;
 
     private PrintScreenHook(Action onPressed)
     {
@@ -41,28 +47,54 @@ internal sealed class PrintScreenHook : IDisposable
         var ready = new ManualResetEventSlim();
         var thread = new Thread(() =>
         {
-            hook._threadId = GetCurrentThreadId();
-            hook._hook = SetWindowsHookEx(WhKeyboardLl, hook._proc, GetModuleHandle(null), 0);
+            Volatile.Write(ref hook._threadId, GetCurrentThreadId());
+            IntPtr h = SetWindowsHookEx(WhKeyboardLl, hook._proc, GetModuleHandle(null), 0);
+            Volatile.Write(ref hook._hook, h);
             ready.Set();
-            if (hook._hook == IntPtr.Zero) return;
+            if (h == IntPtr.Zero) return;
             while (GetMessage(out _, IntPtr.Zero, 0, 0) > 0) { }
-            UnhookWindowsHookEx(hook._hook);
+            UnhookWindowsHookEx(h);
         })
         { IsBackground = true, Name = "dshot Print Screen hook" };
+        hook._thread = thread;
         thread.Start();
         ready.Wait(TimeSpan.FromSeconds(5));
-        return hook._hook != IntPtr.Zero ? hook : null;
+        return Volatile.Read(ref hook._hook) != IntPtr.Zero ? hook : null;
     }
 
     private IntPtr Callback(int code, IntPtr wParam, IntPtr lParam)
     {
-        if (code >= 0 && Marshal.ReadInt32(lParam) == VkSnapshot && !AnyModifierDown())
+        try
         {
-            int message = wParam.ToInt32();
-            if (message is WmKeyDown or WmSysKeyDown) _onPressed();
-            return (IntPtr)1; // Swallow both press and release.
+            if (code >= 0 && Marshal.ReadInt32(lParam) == VkSnapshot)
+            {
+                int message = wParam.ToInt32();
+                if (message is WmKeyDown or WmSysKeyDown)
+                {
+                    // Plain Print Screen (no modifiers): swallow it and fire once per physical press.
+                    if (!AnyModifierDown())
+                    {
+                        if (!_swallowKeyUp)
+                        {
+                            _swallowKeyUp = true;
+                            _onPressed();
+                        }
+                        return (IntPtr)1; // Also swallows auto-repeat while the key is held.
+                    }
+                    // Print Screen with a modifier (e.g. Alt+PrtSc): leave it for the foreground app.
+                }
+                else if ((message is WmKeyUp or WmSysKeyUp) && _swallowKeyUp)
+                {
+                    _swallowKeyUp = false;
+                    return (IntPtr)1; // Swallow the key-up that matches a swallowed key-down.
+                }
+            }
         }
-        return CallNextHookEx(_hook, code, wParam, lParam);
+        catch
+        {
+            // A low-level keyboard hook callback must never throw into the OS; drop and pass the key on.
+        }
+        return CallNextHookEx(Volatile.Read(ref _hook), code, wParam, lParam);
     }
 
     private static bool AnyModifierDown()
@@ -74,8 +106,12 @@ internal sealed class PrintScreenHook : IDisposable
 
     public void Dispose()
     {
-        if (_threadId != 0) PostThreadMessage(_threadId, WmQuit, IntPtr.Zero, IntPtr.Zero);
-        _threadId = 0;
+        uint tid = Interlocked.Exchange(ref _threadId, 0);
+        if (tid != 0)
+        {
+            PostThreadMessage(tid, WmQuit, IntPtr.Zero, IntPtr.Zero);
+            _thread?.Join(250);
+        }
     }
 
     private delegate IntPtr LowLevelKeyboardProc(int code, IntPtr wParam, IntPtr lParam);

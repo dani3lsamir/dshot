@@ -108,7 +108,8 @@ def compose(shot_image: QImage, view_size, selection: QRectF, marks: list[Mark] 
     crop = QRect(round(selection.x() * sx), round(selection.y() * sy),
                  max(1, round(selection.width() * sx)), max(1, round(selection.height() * sy)))
     crop = crop.intersected(shot_image.rect())
-    out = shot_image.copy(crop).convertToFormat(QImage.Format.Format_ARGB32)
+    # Screenshots are opaque, so RGB32 keeps the PNG smaller than ARGB32 with no visible difference.
+    out = shot_image.copy(crop).convertToFormat(QImage.Format.Format_RGB32)
     if marks:
         painter = QPainter(out)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -127,7 +128,8 @@ class Toolbar(QFrame):
         QFrame#toolbar { background: #1f222a; border: 1px solid #5a6069; border-radius: 7px; }
         QToolButton { background: transparent; border: none; border-radius: 5px; padding: 0; }
         QToolButton:hover { background: #3a3f49; }
-        QToolButton:checked { background: #4a505a; }
+        QToolButton:checked { background: #3a6cd6; }
+        QToolButton#closeBtn:hover { background: #b8373b; }
         QFrame#separator { background: #4a505a; }
     """
 
@@ -157,7 +159,8 @@ class Toolbar(QFrame):
         self._button(icons.stroke_icon(icons.COPY), "Copy image (Ctrl+C)", overlay.copy_image)
         self._button(icons.stroke_icon(icons.SAVE), "Save as PNG (Ctrl+S)", overlay.save_image)
         self._separator()
-        self._button(icons.stroke_icon(icons.CLOSE), "Close (Esc)", overlay.session.close)
+        close_btn = self._button(icons.stroke_icon(icons.CLOSE), "Close (Esc)", overlay.session.close)
+        close_btn.setObjectName("closeBtn")  # Red hover, like the Windows build.
         self.adjustSize()
         self.hide()
 
@@ -204,6 +207,9 @@ class OverlayWindow(QWidget):
         self._active: Mark | None = None
         self._editing: Mark | None = None
         self._busy = False
+        self._resize_handle = -1       # 0..7 while dragging a resize handle, else -1.
+        self._resize_origin = QRectF()
+        self._ocr_job: "OcrJob | None" = None
         self.toolbar = Toolbar(self)
 
     # ----- state -----
@@ -258,9 +264,14 @@ class OverlayWindow(QWidget):
         self.update()
 
     # ----- painting -----
-    def paintEvent(self, _event) -> None:
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.drawImage(QRectF(self.rect()), self.shot.image, QRectF(self.shot.image.rect()))
+        # Blit only the dirty region of the screenshot (mapped widget->image), not the whole screen.
+        sx = self.shot.image.width() / max(1, self.width())
+        sy = self.shot.image.height() / max(1, self.height())
+        dirty = QRectF(event.rect())
+        src = QRectF(dirty.x() * sx, dirty.y() * sy, dirty.width() * sx, dirty.height() * sy)
+        painter.drawImage(dirty, self.shot.image, src)
         dim = QPainterPath()
         dim.setFillRule(Qt.FillRule.OddEvenFill)
         dim.addRect(QRectF(self.rect()))
@@ -289,6 +300,33 @@ class OverlayWindow(QWidget):
         painter.setPen(QPen(QColor(0, 0, 0, 140), 1))
         painter.drawRect(outer.adjusted(1, 1, -2, -2))
 
+        # Size badge (W × H in captured pixels) inside the selection, like the Windows build.
+        if self.selection.width() >= 70 and self.selection.height() >= 28:
+            pw = max(1, round(self.selection.width() * sx))
+            ph = max(1, round(self.selection.height() * sy))
+            label = f"{pw} × {ph}"
+            font = QFont()
+            font.setPixelSize(11)
+            font.setBold(True)
+            painter.setFont(font)
+            fm = QFontMetricsF(font)
+            badge = QRectF(self.selection.left() + 6, self.selection.top() + 6,
+                           fm.horizontalAdvance(label) + 12, fm.height() + 4)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(QPen(QColor(255, 255, 255, 140), 1))
+            painter.setBrush(QColor(24, 27, 34, 205))
+            painter.drawRoundedRect(badge, 4, 4)
+            painter.setPen(QColor("white"))
+            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, label)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        # Eight resize handles once a region exists (not while still rubber-banding the first drag).
+        if self.has_selection:
+            painter.setPen(QPen(QColor(0, 0, 0, 200), 1))
+            painter.setBrush(QColor("white"))
+            for pt in self._handle_centers():
+                painter.drawRect(QRectF(pt.x() - 3.5, pt.y() - 3.5, 7, 7))
+
         if self._editing:
             # Dashed box and caret around the text being typed.
             bounds = text_bounds(self._editing).adjusted(-3, -2, 3, 2)
@@ -305,13 +343,61 @@ class OverlayWindow(QWidget):
             painter.setPen(QPen(self._editing.color, 1.5))
             painter.drawLine(QPointF(caret_x, caret_y + 2), QPointF(caret_x, caret_y + metrics.height() - 2))
 
+    # ----- resize handles -----
+    def _handle_centers(self) -> list[QPointF]:
+        """Centers of the 8 handles: NW, N, NE, E, SE, S, SW, W."""
+        r = self.selection
+        mx, my = (r.left() + r.right()) / 2, (r.top() + r.bottom()) / 2
+        return [QPointF(r.left(), r.top()), QPointF(mx, r.top()), QPointF(r.right(), r.top()),
+                QPointF(r.right(), my), QPointF(r.right(), r.bottom()), QPointF(mx, r.bottom()),
+                QPointF(r.left(), r.bottom()), QPointF(r.left(), my)]
+
+    def _hit_handle(self, pos: QPointF) -> int:
+        if not self.has_selection or self.selection.isEmpty():
+            return -1
+        for i, pt in enumerate(self._handle_centers()):
+            if abs(pos.x() - pt.x()) <= 7 and abs(pos.y() - pt.y()) <= 7:
+                return i
+        return -1
+
+    @staticmethod
+    def _handle_cursor(handle: int) -> Qt.CursorShape:
+        if handle in (0, 4):
+            return Qt.CursorShape.SizeFDiagCursor
+        if handle in (2, 6):
+            return Qt.CursorShape.SizeBDiagCursor
+        if handle in (1, 5):
+            return Qt.CursorShape.SizeVerCursor
+        if handle in (3, 7):
+            return Qt.CursorShape.SizeHorCursor
+        return Qt.CursorShape.CrossCursor
+
     # ----- mouse -----
     def mousePressEvent(self, event) -> None:
-        if self._busy or event.button() != Qt.MouseButton.LeftButton:
+        if self._busy:
+            return
+        # Right click clears the selection, or closes the capture if there is none (Lightshot-style).
+        if event.button() == Qt.MouseButton.RightButton:
+            if self._editing:
+                self.commit_text()
+            elif self.has_selection:
+                self.clear_selection()
+            else:
+                self.session.close()
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position()
         # Clicking anywhere outside the text being typed finishes it, as in Lightshot.
         self.commit_text()
+        if self.has_selection:
+            handle = self._hit_handle(pos)
+            if handle >= 0:  # Grab a handle to resize the existing region.
+                self._resize_handle = handle
+                self._resize_origin = QRectF(self.selection)
+                self._drag_start = pos
+                self.toolbar.hide()
+                return
         if self.tool is Tool.SELECT:
             self.session.start_selection(self)
             self._drag_start = pos
@@ -328,9 +414,35 @@ class OverlayWindow(QWidget):
         self._active = Mark(self.tool, self.color, [pos, pos] if self.tool is not Tool.PEN else [pos])
 
     def mouseMoveEvent(self, event) -> None:
-        if self._drag_start is None:
-            return
         pos = event.position()
+        if self._drag_start is None:
+            # Idle: hint the cursor (resize over a handle, I-beam for text, else crosshair).
+            if not self._busy:
+                handle = self._hit_handle(pos)
+                if handle >= 0:
+                    self.setCursor(self._handle_cursor(handle))
+                elif self.tool is Tool.TEXT and self.selection.contains(pos):
+                    self.setCursor(Qt.CursorShape.IBeamCursor)
+                else:
+                    self.setCursor(Qt.CursorShape.CrossCursor)
+            return
+        if self._resize_handle >= 0:
+            previous = QRectF(self.selection)
+            px = min(max(pos.x(), 0.0), float(self.width()))
+            py = min(max(pos.y(), 0.0), float(self.height()))
+            o = self._resize_origin
+            left, top, right, bottom = o.left(), o.top(), o.right(), o.bottom()
+            if self._resize_handle in (0, 6, 7):
+                left = min(px, right - MIN_SELECTION)
+            if self._resize_handle in (2, 3, 4):
+                right = max(px, left + MIN_SELECTION)
+            if self._resize_handle in (0, 1, 2):
+                top = min(py, bottom - MIN_SELECTION)
+            if self._resize_handle in (4, 5, 6):
+                bottom = max(py, top + MIN_SELECTION)
+            self.selection = QRectF(left, top, right - left, bottom - top)
+            self.update_area(previous.united(self.selection).adjusted(-6, -6, 6, 6))
+            return
         if self.tool is Tool.SELECT:
             previous = self.selection
             self.selection = normalized(self._drag_start, pos).intersected(QRectF(self.rect()))
@@ -339,7 +451,9 @@ class OverlayWindow(QWidget):
             pos = QPointF(min(max(pos.x(), self.selection.left()), self.selection.right()),
                           min(max(pos.y(), self.selection.top()), self.selection.bottom()))
             if self._active.tool is Tool.PEN:
-                self._active.points.append(pos)
+                # Skip points closer than ~1.5 px: fewer points, same stroke.
+                if QLineF(self._active.points[-1], pos).length() >= 1.5:
+                    self._active.points.append(pos)
             else:
                 self._active.points[-1] = pos
             self.update_area(self.selection)  # Marks are clipped to the selection.
@@ -352,6 +466,11 @@ class OverlayWindow(QWidget):
         if self._drag_start is None or event.button() != Qt.MouseButton.LeftButton:
             return
         self._drag_start = None
+        if self._resize_handle >= 0:
+            self._resize_handle = -1
+            self.place_toolbar()
+            self.update()
+            return
         if self.tool is Tool.SELECT:
             if self.selection.width() < MIN_SELECTION or self.selection.height() < MIN_SELECTION:
                 self.selection = QRectF()
@@ -398,7 +517,8 @@ class OverlayWindow(QWidget):
             elif key == Qt.Key.Key_Z:
                 self.undo()
             elif key == Qt.Key.Key_V and self._editing:
-                self._editing.text += QGuiApplication.clipboard().text()
+                pasted = QGuiApplication.clipboard().text().replace("\r\n", "\n").replace("\r", "\n")
+                self._editing.text += pasted
                 self.update()
             return
         if self._editing:
@@ -446,13 +566,14 @@ class OverlayWindow(QWidget):
             return
         self._busy = True
         self.setCursor(Qt.CursorShape.WaitCursor)
-        job = OcrJob(self.composed(annotations=False), self)
-        job.finished.connect(self._ocr_done)
-        job.failed.connect(self._ocr_failed)
-        job.start()
+        self._ocr_job = OcrJob(self.composed(annotations=False), self)
+        self._ocr_job.finished.connect(self._ocr_done)
+        self._ocr_job.failed.connect(self._ocr_failed)
+        self._ocr_job.start()
 
     def _ocr_done(self, text: str) -> None:
         self._busy = False
+        self._ocr_job = None
         self.setCursor(Qt.CursorShape.CrossCursor)
         if not text:
             QMessageBox.information(self, "dshot", "No text found. Try a larger region or text with better contrast.")
@@ -463,8 +584,16 @@ class OverlayWindow(QWidget):
 
     def _ocr_failed(self, message: str) -> None:
         self._busy = False
+        self._ocr_job = None
         self.setCursor(Qt.CursorShape.CrossCursor)
         QMessageBox.warning(self, "dshot", f"Text recognition failed: {message}")
+
+    def closeEvent(self, event) -> None:
+        # Stop a running OCR so its QProcess is not torn down mid-recognition when the overlay goes away.
+        if self._ocr_job is not None:
+            self._ocr_job.cancel()
+            self._ocr_job = None
+        super().closeEvent(event)
 
 
 class CaptureSession(QObject):
@@ -480,6 +609,13 @@ class CaptureSession(QObject):
 
     def show(self) -> None:
         for overlay in self.overlays:
+            # Pin each overlay to its own screen before showing it: on some X11/Wayland setups
+            # showFullScreen() otherwise lands every window on the primary screen.
+            overlay.winId()
+            handle = overlay.windowHandle()
+            if handle is not None:
+                handle.setScreen(overlay.shot.screen)
+            overlay.setGeometry(overlay.shot.geometry)
             overlay.showFullScreen()
         # Focus the screen under the mouse so keyboard shortcuts work straight away.
         target = next((o for o in self.overlays if o.geometry().contains(QCursor.pos())), self.overlays[0])

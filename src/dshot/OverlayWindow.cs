@@ -40,6 +40,9 @@ internal sealed class OverlayWindow : Window
     private readonly Drawing.Bitmap _snapshot; // Owned by the capture session, which disposes it.
     private readonly Drawing.Rectangle _bounds; // The monitor this overlay covers, in physical pixels.
     private readonly Canvas _canvas = new() { Background = Brushes.Transparent, ClipToBounds = true };
+    // Annotations live on their own layer clipped to the selection, so nothing is drawn past its edges.
+    private readonly Canvas _marksLayer = new() { IsHitTestVisible = false };
+    private readonly RectangleGeometry _marksClip = new(Rect.Empty);
     private readonly Border _toolbar = new();
     // Lightshot-style selection: a white edge with a dark inner line, readable on light and dark content.
     private readonly Border _selection = new()
@@ -64,9 +67,24 @@ internal sealed class OverlayWindow : Window
     private Rect _selected = Rect.Empty;
     private bool _dragging;
     private Mark? _activeMark;
+    private Polygon? _activeArrowHead; // Live arrowhead while an arrow is being dragged (WYSIWYG).
     private TextBox? _textEdit;
     private Point _textPosition;
     private bool _busy;
+    // Eight resize handles (NW, N, NE, E, SE, S, SW, W) and the drag state while one is grabbed.
+    private readonly Rectangle[] _handles = new Rectangle[8];
+    private int _resizeHandle = -1;
+    private Rect _resizeOrigin;
+    // W × H badge (in captured pixels) shown inside the selection, like the Linux build.
+    private readonly TextBlock _sizeText = new()
+    {
+        Foreground = Brushes.White, FontFamily = new FontFamily("Segoe UI"), FontSize = 11.5, FontWeight = FontWeights.SemiBold
+    };
+    private readonly Border _sizeBadge = new()
+    {
+        BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(4),
+        Padding = new Thickness(6, 2, 6, 2), IsHitTestVisible = false, Visibility = Visibility.Collapsed
+    };
 
     private const double TextFontSize = 20;
     private static readonly FontFamily TextFont = new("Segoe UI"); // Same face the exported PNG uses.
@@ -79,6 +97,12 @@ internal sealed class OverlayWindow : Window
 
     /// <summary>Raised when a region drag starts here, so overlays on other monitors drop their selection.</summary>
     public event Action<OverlayWindow>? SelectionStarted;
+
+    /// <summary>Asks the session to hide (false) or show (true) every overlay, e.g. around the Save dialog.</summary>
+    public event Action<bool>? VisibilityRequested;
+
+    /// <summary>Asks the session to show a tray notification (title, message), e.g. after OCR.</summary>
+    public event Action<string, string>? NotificationRequested;
 
     public Drawing.Rectangle ScreenBounds => _bounds;
     public bool HasRegion => !_selected.IsEmpty;
@@ -123,20 +147,45 @@ internal sealed class OverlayWindow : Window
             IsHitTestVisible = false
         };
         _canvas.SizeChanged += (_, e) => _dimArea.Rect = new Rect(e.NewSize);
+        _canvas.Cursor = Cursors.Cross; // Crosshair over the screenshot, like Lightshot and the Linux build.
+        _marksLayer.Clip = _marksClip;
         var grid = new Grid();
         grid.Children.Add(image);
         grid.Children.Add(dim);
+        grid.Children.Add(_marksLayer);
         grid.Children.Add(_canvas);
         Content = grid;
 
         _canvas.Children.Add(_selection);
+        BuildHandles();
+        _sizeBadge.Background = Frozen(MediaColor.FromArgb(205, 24, 27, 34));
+        _sizeBadge.BorderBrush = Frozen(MediaColor.FromArgb(140, 255, 255, 255));
+        _sizeBadge.Child = _sizeText;
+        _canvas.Children.Add(_sizeBadge);
         CreateToolbar();
+        _toolbar.Cursor = Cursors.Arrow;
         _canvas.Children.Add(_toolbar);
         _canvas.MouseLeftButtonDown += OnCanvasMouseDown;
         _canvas.MouseMove += OnCanvasMouseMove;
         _canvas.MouseLeftButtonUp += OnCanvasMouseUp;
+        _canvas.MouseRightButtonDown += OnCanvasRightButtonDown;
         PreviewKeyDown += KeyPressed;
         Loaded += (_, _) => { FitToScreen(); Focus(); };
+    }
+
+    private void BuildHandles()
+    {
+        var fill = Frozen(Colors.White);
+        var stroke = Frozen(MediaColor.FromArgb(200, 0, 0, 0));
+        for (int i = 0; i < _handles.Length; i++)
+        {
+            _handles[i] = new Rectangle
+            {
+                Width = 7, Height = 7, Fill = fill, Stroke = stroke, StrokeThickness = 1,
+                IsHitTestVisible = false, Visibility = Visibility.Collapsed
+            };
+            _canvas.Children.Add(_handles[i]);
+        }
     }
 
     // Windows animates new windows in (a fade/zoom of a few hundred ms), which makes the capture feel slow
@@ -230,7 +279,8 @@ internal sealed class OverlayWindow : Window
         return brush;
     }
 
-    private static readonly Brush ActiveToolBrush = Frozen(MediaColor.FromRgb(74, 80, 90));
+    private static readonly Brush ActiveToolBrush = Frozen(MediaColor.FromRgb(58, 108, 214)); // Blue, like Linux's checked state.
+    private static readonly Brush SeparatorBrush = Frozen(MediaColor.FromRgb(74, 80, 90));
     private static readonly Brush DimBrush = Frozen(MediaColor.FromArgb(110, 0, 0, 0));
     private static readonly Brush ToolbarBrush = Frozen(MediaColor.FromRgb(31, 34, 42));
     private static readonly Brush ToolbarEdgeBrush = Frozen(MediaColor.FromRgb(90, 96, 105));
@@ -241,6 +291,16 @@ internal sealed class OverlayWindow : Window
         "<ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/></Border>" +
         "<ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'>" +
         "<Setter TargetName='Chrome' Property='Background' Value='#3A3F49'/></Trigger></ControlTemplate.Triggers>" +
+        "</ControlTemplate>");
+
+    // The Close button turns red on hover, like the Linux build.
+    private static readonly ControlTemplate CloseToolTemplate = (ControlTemplate)System.Windows.Markup.XamlReader.Parse(
+        "<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' " +
+        "xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='Button'>" +
+        "<Border x:Name='Chrome' Background='{TemplateBinding Background}' CornerRadius='5'>" +
+        "<ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/></Border>" +
+        "<ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'>" +
+        "<Setter TargetName='Chrome' Property='Background' Value='#B8373B'/></Trigger></ControlTemplate.Triggers>" +
         "</ControlTemplate>");
 
     private readonly Dictionary<EditMode, Button> _modeButtons = new();
@@ -265,7 +325,7 @@ internal sealed class OverlayWindow : Window
         AddTool(row, ToolIcon(Icons.Copy), "Copy image (Ctrl + C)", () => CopyImage());
         AddTool(row, ToolIcon(Icons.Save), "Save as PNG (Ctrl + S)", SaveImage);
         AddSeparator(row);
-        AddTool(row, ToolIcon(Icons.Close), "Close (Esc)", Close);
+        AddTool(row, ToolIcon(Icons.Close), "Close (Esc)", Close, CloseToolTemplate);
 
         _toolbar.Child = row;
         _toolbar.Background = ToolbarBrush;
@@ -286,17 +346,20 @@ internal sealed class OverlayWindow : Window
         StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round, StrokeLineJoin = PenLineJoin.Round
     };
 
-    private static Button AddTool(Panel panel, UIElement icon, string tooltip, Action action)
+    private static Button AddTool(Panel panel, UIElement icon, string tooltip, Action action, ControlTemplate? template = null)
     {
         var button = new Button
         {
             Content = icon,
             ToolTip = tooltip,
-            Template = ToolTemplate,
+            Template = template ?? ToolTemplate,
             Width = 30, Height = 30,
             Margin = new Thickness(1, 0, 1, 0),
             Background = Brushes.Transparent,
             FocusVisualStyle = null,
+            // Not focusable: clicking a tool must never steal keyboard focus from the text box being
+            // typed (that would commit the text before Color/Undo could act on it).
+            Focusable = false,
             Cursor = Cursors.Hand
         };
         button.Click += (_, _) => action();
@@ -307,12 +370,13 @@ internal sealed class OverlayWindow : Window
     private static void AddSeparator(Panel panel) => panel.Children.Add(new Border
     {
         Width = 1, Height = 18, Margin = new Thickness(4, 0, 4, 0), VerticalAlignment = VerticalAlignment.Center,
-        Background = ActiveToolBrush
+        Background = SeparatorBrush
     });
 
     // Highlights the active drawing tool so it is clear what a drag on the screenshot will do.
     private void SetMode(EditMode mode)
     {
+        CommitText(); // Switching tools finishes any text being typed, in its current color.
         _mode = mode;
         foreach (var (toolMode, button) in _modeButtons)
             button.Background = toolMode == mode ? ActiveToolBrush : Brushes.Transparent;
@@ -370,6 +434,20 @@ internal sealed class OverlayWindow : Window
         // Clicking anywhere outside the text being typed finishes it, as in Lightshot.
         if (_textEdit is not null) CommitText();
         var p = e.GetPosition(_canvas);
+        // Grab a resize handle on an existing region before anything else.
+        if (HasSelection)
+        {
+            int handle = HitHandle(p);
+            if (handle >= 0)
+            {
+                _resizeHandle = handle;
+                _resizeOrigin = _selected;
+                _dragging = true;
+                _toolbar.Visibility = Visibility.Collapsed;
+                _canvas.CaptureMouse();
+                return;
+            }
+        }
         if (_mode == EditMode.Select)
         {
             SelectionStarted?.Invoke(this);
@@ -393,7 +471,7 @@ internal sealed class OverlayWindow : Window
             var rect = new Rectangle { Stroke = new SolidColorBrush(_activeMark.Color), StrokeThickness = 2.5,
                 Fill = Brushes.Transparent, IsHitTestVisible = false };
             _activeMark.Visual = rect;
-            _canvas.Children.Add(rect);
+            _marksLayer.Children.Add(rect);
         }
         else
         {
@@ -402,15 +480,51 @@ internal sealed class OverlayWindow : Window
                 StrokeEndLineCap = PenLineCap.Round, IsHitTestVisible = false };
             polyline.Points.Add(p);
             _activeMark.Visual = polyline;
-            _canvas.Children.Add(polyline);
+            _marksLayer.Children.Add(polyline);
+            if (_mode == EditMode.Arrow)
+            {
+                // A filled head drawn live, so the arrow on screen matches the exported one.
+                _activeArrowHead = new Polygon { Fill = new SolidColorBrush(_activeMark.Color), IsHitTestVisible = false };
+                _marksLayer.Children.Add(_activeArrowHead);
+            }
         }
         _canvas.CaptureMouse();
     }
 
+    private void OnCanvasRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_busy) return;
+        // Right click finishes typing, else clears the region, else closes — like the Linux build.
+        if (_textEdit is not null) CommitText();
+        else if (HasSelection) ClearSelection();
+        else Close();
+    }
+
     private void OnCanvasMouseMove(object sender, MouseEventArgs e)
     {
-        if (!_dragging) return;
         Point p = e.GetPosition(_canvas);
+        if (!_dragging)
+        {
+            // Idle hover: show a resize cursor over a handle, else the canvas keeps its crosshair.
+            if (!_busy)
+            {
+                int hover = HitHandle(p);
+                _canvas.Cursor = hover >= 0 ? HandleCursor(hover)
+                    : _mode == EditMode.Text && _selected.Contains(p) ? Cursors.IBeam : Cursors.Cross;
+            }
+            return;
+        }
+        if (_resizeHandle >= 0)
+        {
+            p = ClampToCanvas(p);
+            double l = _resizeOrigin.Left, t = _resizeOrigin.Top, r = _resizeOrigin.Right, b = _resizeOrigin.Bottom;
+            if (_resizeHandle is 0 or 6 or 7) l = Math.Min(p.X, r - 6);
+            if (_resizeHandle is 2 or 3 or 4) r = Math.Max(p.X, l + 6);
+            if (_resizeHandle is 0 or 1 or 2) t = Math.Min(p.Y, b - 6);
+            if (_resizeHandle is 4 or 5 or 6) b = Math.Max(p.Y, t + 6);
+            UpdateSelectionRect(new Rect(l, t, r - l, b - t));
+            return;
+        }
         if (_mode == EditMode.Select) { UpdateSelection(p); return; }
         p = ClampToSelection(p);
         if (_activeMark is null) return;
@@ -423,19 +537,14 @@ internal sealed class OverlayWindow : Window
             rectangle.Width = r.Width;
             rectangle.Height = r.Height;
         }
-        else if (_activeMark.Visual is Polyline polyline)
+        else if (_activeMark.Type == EditMode.Arrow && _activeMark.Visual is Polyline arrowLine && _activeArrowHead is not null)
         {
-            if (_activeMark.Type == EditMode.Pen)
-            {
-                _activeMark.Points.Add(p);
-                polyline.Points.Add(p);
-            }
-            else
-            {
-                polyline.Points.Clear();
-                polyline.Points.Add(_start);
-                polyline.Points.Add(p);
-            }
+            UpdateArrowVisual(arrowLine, _activeArrowHead, _start, p);
+        }
+        else if (_activeMark.Visual is Polyline polyline && _activeMark.Type == EditMode.Pen)
+        {
+            _activeMark.Points.Add(p);
+            polyline.Points.Add(p);
         }
     }
 
@@ -444,6 +553,12 @@ internal sealed class OverlayWindow : Window
         if (!_dragging) return;
         _dragging = false;
         _canvas.ReleaseMouseCapture();
+        if (_resizeHandle >= 0)
+        {
+            _resizeHandle = -1;
+            PlaceToolbar();
+            return;
+        }
         if (_mode == EditMode.Select)
         {
             UpdateSelection(e.GetPosition(_canvas));
@@ -452,24 +567,21 @@ internal sealed class OverlayWindow : Window
                 _selection.Visibility = Visibility.Collapsed;
                 _selected = Rect.Empty;
                 _dimHole.Rect = Rect.Empty;
+                UpdateHandlesAndBadge();
                 return;
             }
             SetMode(EditMode.Rectangle); // When selected, toolbar lets user choose annotation mode.
+            UpdateHandlesAndBadge();     // HasSelection is true now, so the handles and badge appear.
             PlaceToolbar();
             return;
         }
         if (_activeMark is null) return;
         if (_activeMark.Type == EditMode.Pen && _activeMark.Points.Count < 2)
             _activeMark.Points.Add(_activeMark.End);
-        if (_activeMark.Type == EditMode.Arrow)
+        if (_activeMark.Type == EditMode.Arrow && _activeArrowHead is not null)
         {
-            var head = MakeArrowHead(_activeMark.Start, _activeMark.End, _activeMark.Color);
-            if (head is not null)
-            {
-                _canvas.Children.Add(head);
-                // Keep a dedicated container for undo alongside the line.
-                _arrowheads[_activeMark] = head;
-            }
+            _arrowheads[_activeMark] = _activeArrowHead; // Keep it alongside the line for undo.
+            _activeArrowHead = null;
         }
         _marks.Add(_activeMark);
         _activeMark = null;
@@ -477,28 +589,36 @@ internal sealed class OverlayWindow : Window
 
     private readonly Dictionary<Mark, Polygon> _arrowheads = new();
 
-    private static Polygon? MakeArrowHead(Point a, Point b, MediaColor color)
+    // Shaft stops short of the tip and a filled triangle forms the head; shared by screen and export.
+    private static void UpdateArrowVisual(Polyline shaft, Polygon head, Point a, Point b)
     {
+        shaft.Points.Clear();
+        head.Points.Clear();
         Vector v = b - a;
-        if (v.Length < 4) return null;
+        if (v.Length < 4) { shaft.Points.Add(a); shaft.Points.Add(b); return; }
         v.Normalize();
         var perpendicular = new Vector(-v.Y, v.X);
-        var basePoint = b - v * 12;
-        return new Polygon
-        {
-            Points = new PointCollection { b, basePoint + perpendicular * 5, basePoint - perpendicular * 5 },
-            Fill = new SolidColorBrush(color), IsHitTestVisible = false
-        };
+        const double headLen = 14, wing = 6;
+        shaft.Points.Add(a);
+        shaft.Points.Add(b - v * (headLen * 0.78));
+        var basePoint = b - v * headLen;
+        head.Points.Add(b);
+        head.Points.Add(basePoint + perpendicular * wing);
+        head.Points.Add(basePoint - perpendicular * wing);
     }
 
-    private void UpdateSelection(Point end)
+    private void UpdateSelection(Point end) => UpdateSelectionRect(Normalize(_start, ClampToCanvas(end)));
+
+    private void UpdateSelectionRect(Rect rect)
     {
-        _selected = Normalize(_start, end);
+        _selected = rect;
         Canvas.SetLeft(_selection, _selected.Left);
         Canvas.SetTop(_selection, _selected.Top);
         _selection.Width = _selected.Width;
         _selection.Height = _selected.Height;
         _dimHole.Rect = _selected;
+        _marksClip.Rect = _selected;
+        UpdateHandlesAndBadge();
     }
 
     private static Rect Normalize(Point a, Point b) => new(
@@ -507,6 +627,68 @@ internal sealed class OverlayWindow : Window
     private Point ClampToSelection(Point p) => new(
         Math.Clamp(p.X, _selected.Left, _selected.Right),
         Math.Clamp(p.Y, _selected.Top, _selected.Bottom));
+
+    private Point ClampToCanvas(Point p) => new(
+        Math.Clamp(p.X, 0, Math.Max(0, _canvas.ActualWidth)),
+        Math.Clamp(p.Y, 0, Math.Max(0, _canvas.ActualHeight)));
+
+    // Centers of the 8 handles: NW, N, NE, E, SE, S, SW, W.
+    private static Point[] HandleCenters(Rect r) =>
+    [
+        new(r.Left, r.Top), new((r.Left + r.Right) / 2, r.Top), new(r.Right, r.Top),
+        new(r.Right, (r.Top + r.Bottom) / 2), new(r.Right, r.Bottom),
+        new((r.Left + r.Right) / 2, r.Bottom), new(r.Left, r.Bottom), new(r.Left, (r.Top + r.Bottom) / 2)
+    ];
+
+    private int HitHandle(Point p)
+    {
+        if (!HasSelection || _selected.IsEmpty) return -1;
+        var pts = HandleCenters(_selected);
+        for (int i = 0; i < pts.Length; i++)
+            if (Math.Abs(p.X - pts[i].X) <= 7 && Math.Abs(p.Y - pts[i].Y) <= 7) return i;
+        return -1;
+    }
+
+    private static Cursor HandleCursor(int handle) => handle switch
+    {
+        0 or 4 => Cursors.SizeNWSE,
+        2 or 6 => Cursors.SizeNESW,
+        1 or 5 => Cursors.SizeNS,
+        3 or 7 => Cursors.SizeWE,
+        _ => Cursors.Cross
+    };
+
+    private void UpdateHandlesAndBadge()
+    {
+        if (HasSelection && !_selected.IsEmpty)
+        {
+            var pts = HandleCenters(_selected);
+            for (int i = 0; i < _handles.Length; i++)
+            {
+                Canvas.SetLeft(_handles[i], pts[i].X - 3.5);
+                Canvas.SetTop(_handles[i], pts[i].Y - 3.5);
+                _handles[i].Visibility = Visibility.Visible;
+            }
+        }
+        else
+        {
+            foreach (var h in _handles) h.Visibility = Visibility.Collapsed;
+        }
+
+        if (_selected.Width >= 70 && _selected.Height >= 28 && _canvas.ActualWidth > 0 && _canvas.ActualHeight > 0)
+        {
+            int pw = Math.Max(1, (int)Math.Round(_selected.Width * (_snapshot.Width / _canvas.ActualWidth)));
+            int ph = Math.Max(1, (int)Math.Round(_selected.Height * (_snapshot.Height / _canvas.ActualHeight)));
+            _sizeText.Text = $"{pw} × {ph}";
+            Canvas.SetLeft(_sizeBadge, _selected.Left + 6);
+            Canvas.SetTop(_sizeBadge, _selected.Top + 6);
+            _sizeBadge.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            _sizeBadge.Visibility = Visibility.Collapsed;
+        }
+    }
 
     private void PlaceToolbar()
     {
@@ -561,7 +743,7 @@ internal sealed class OverlayWindow : Window
         Canvas.SetLeft(visual, _textPosition.X);
         Canvas.SetTop(visual, _textPosition.Y);
         mark.Visual = visual;
-        _canvas.Children.Add(visual);
+        _marksLayer.Children.Add(visual); // Clipped to the selection, so long text never spills out.
         _marks.Add(mark);
     }
 
@@ -580,27 +762,30 @@ internal sealed class OverlayWindow : Window
             _dragging = false;
             _canvas.ReleaseMouseCapture();
         }
-        if (_activeMark?.Visual is not null) _canvas.Children.Remove(_activeMark.Visual);
+        if (_activeMark?.Visual is not null) _marksLayer.Children.Remove(_activeMark.Visual);
+        if (_activeArrowHead is not null) { _marksLayer.Children.Remove(_activeArrowHead); _activeArrowHead = null; }
         _activeMark = null;
         foreach (var mark in _marks)
-            if (mark.Visual is not null) _canvas.Children.Remove(mark.Visual);
-        foreach (var head in _arrowheads.Values) _canvas.Children.Remove(head);
+            if (mark.Visual is not null) _marksLayer.Children.Remove(mark.Visual);
+        foreach (var head in _arrowheads.Values) _marksLayer.Children.Remove(head);
         _marks.Clear();
         _arrowheads.Clear();
         SetMode(EditMode.Select);
         _selected = Rect.Empty;
         _dimHole.Rect = Rect.Empty;
+        _marksClip.Rect = Rect.Empty;
         _selection.Visibility = Visibility.Collapsed;
         _toolbar.Visibility = Visibility.Collapsed;
+        UpdateHandlesAndBadge();
     }
 
     private void Undo()
     {
-        if (_marks.Count == 0) return;
+        if (_textEdit is not null || _marks.Count == 0) return;
         var mark = _marks[^1];
         _marks.RemoveAt(_marks.Count - 1);
-        if (mark.Visual is not null) _canvas.Children.Remove(mark.Visual);
-        if (_arrowheads.Remove(mark, out var head)) _canvas.Children.Remove(head);
+        if (mark.Visual is not null) _marksLayer.Children.Remove(mark.Visual);
+        if (_arrowheads.Remove(mark, out var head)) _marksLayer.Children.Remove(head);
     }
 
     private Drawing.Bitmap ComposeImage(bool annotations)
@@ -641,11 +826,38 @@ internal sealed class OverlayWindow : Window
             }
             else if (mark.Type == EditMode.Arrow)
             {
-                pen.CustomEndCap = new Drawing2D.AdjustableArrowCap(5, 5, true);
-                graphics.DrawLine(pen, start, end);
+                // Same geometry as the on-screen preview: shaft stops short of a filled triangle head.
+                float dx = end.X - start.X, dy = end.Y - start.Y;
+                float len = MathF.Sqrt(dx * dx + dy * dy);
+                if (len >= 4f)
+                {
+                    float ux = dx / len, uy = dy / len, px = -uy, py = ux;
+                    float headLen = (float)(14 * xScale), wing = (float)(6 * xScale);
+                    var tipBack = new PointF(end.X - ux * headLen * 0.78f, end.Y - uy * headLen * 0.78f);
+                    graphics.DrawLine(pen, start, tipBack);
+                    var basePt = new PointF(end.X - ux * headLen, end.Y - uy * headLen);
+                    using var headBrush = new Drawing.SolidBrush(c);
+                    graphics.FillPolygon(headBrush, new[]
+                    {
+                        end,
+                        new PointF(basePt.X + px * wing, basePt.Y + py * wing),
+                        new PointF(basePt.X - px * wing, basePt.Y - py * wing)
+                    });
+                }
             }
-            else if (mark.Type == EditMode.Pen && mark.Points.Count >= 2)
-                graphics.DrawLines(pen, mark.Points.Select(Pixel).ToArray());
+            else if (mark.Type == EditMode.Pen && mark.Points.Count > 0)
+            {
+                var pts = mark.Points.Select(Pixel).ToArray();
+                if (pts.Length >= 2)
+                    graphics.DrawLines(pen, pts);
+                else
+                {
+                    // A single tap: draw a round dot so it is not lost.
+                    float radius = pen.Width / 2f;
+                    using var dotBrush = new Drawing.SolidBrush(c);
+                    graphics.FillEllipse(dotBrush, pts[0].X - radius, pts[0].Y - radius, pen.Width, pen.Width);
+                }
+            }
             else if (mark.Type == EditMode.Text)
             {
                 using var font = new Drawing.Font("Segoe UI", (float)(TextFontSize * yScale), Drawing.FontStyle.Bold, Drawing.GraphicsUnit.Pixel);
@@ -658,12 +870,24 @@ internal sealed class OverlayWindow : Window
         return output;
     }
 
+    // Another app can briefly lock the clipboard (CLIPBRD_E_CANT_OPEN); retry a few times before failing.
+    private static void WithClipboardRetry(Action action)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try { action(); return; }
+            catch (COMException) when (attempt < 5) { System.Threading.Thread.Sleep(25); }
+        }
+    }
+
     private void CopyImage()
     {
+        CommitText();
         try
         {
             using var bitmap = ComposeImage(true);
-            System.Windows.Clipboard.SetImage(ToBitmapSource(bitmap));
+            var source = ToBitmapSource(bitmap);
+            WithClipboardRetry(() => System.Windows.Clipboard.SetImage(source));
             Close();
         }
         catch (Exception ex) { Warn(ex.Message); }
@@ -672,6 +896,7 @@ internal sealed class OverlayWindow : Window
     private async System.Threading.Tasks.Task ExtractTextAsync()
     {
         if (_busy) return;
+        CommitText();
         _busy = true;
         Cursor = Cursors.Wait;
         try
@@ -683,7 +908,9 @@ internal sealed class OverlayWindow : Window
                 Warn("No text found. Try a larger region or text with better contrast.");
                 return;
             }
-            System.Windows.Clipboard.SetText(result);
+            WithClipboardRetry(() => System.Windows.Clipboard.SetText(result));
+            string preview = result.Length <= 120 ? result : result[..117] + "...";
+            NotificationRequested?.Invoke("Text copied", preview);
             Close();
         }
         catch (Exception ex) { Warn("Text recognition failed: " + ex.Message); }
@@ -692,16 +919,33 @@ internal sealed class OverlayWindow : Window
 
     private void SaveImage()
     {
-        var dialog = new SaveFileDialog { Filter = "PNG image|*.png", DefaultExt = ".png",
-            AddExtension = true, FileName = $"dshot_{DateTime.Now:yyyyMMdd_HHmmss}.png" };
-        if (dialog.ShowDialog(this) != true) return;
-        try
+        CommitText();
+        Drawing.Bitmap bitmap;
+        try { bitmap = ComposeImage(true); }
+        catch (Exception ex) { Warn(ex.Message); return; }
+        using (bitmap)
         {
-            using var bitmap = ComposeImage(true);
-            bitmap.Save(dialog.FileName, ImageFormat.Png);
-            Close();
+            var dialog = new SaveFileDialog { Filter = "PNG image|*.png", DefaultExt = ".png",
+                AddExtension = true, FileName = $"dshot_{DateTime.Now:yyyyMMdd_HHmmss}.png" };
+            // Hide every overlay so the dialog is never stuck behind another monitor's Topmost overlay.
+            VisibilityRequested?.Invoke(false);
+            bool ok = dialog.ShowDialog() == true;
+            if (!ok)
+            {
+                VisibilityRequested?.Invoke(true);
+                return;
+            }
+            try
+            {
+                bitmap.Save(dialog.FileName, ImageFormat.Png);
+                Close();
+            }
+            catch (Exception ex)
+            {
+                VisibilityRequested?.Invoke(true);
+                Warn("Could not save: " + ex.Message);
+            }
         }
-        catch (Exception ex) { Warn("Could not save: " + ex.Message); }
     }
 
     private void Warn(string message) => MessageBox.Show(this, message, "dshot",

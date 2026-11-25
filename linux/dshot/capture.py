@@ -72,6 +72,9 @@ def crop_rects(width: int, height: int, geometries: list[QRect]) -> list[QRect]:
     virtual = QRect()
     for g in geometries:
         virtual = virtual.united(g)
+    if virtual.width() <= 0 or virtual.height() <= 0:
+        # No usable geometry: treat the whole image as covering each screen rather than divide by zero.
+        return [QRect(0, 0, width, height) for _ in geometries]
     sx = width / virtual.width()
     sy = height / virtual.height()
     return [QRect(round((g.x() - virtual.x()) * sx), round((g.y() - virtual.y()) * sy),
@@ -117,13 +120,17 @@ def portal_screenshot(timeout: float = 60) -> QImage:
         raise CaptureError("The screenshot was cancelled or not allowed by the desktop.")
     uri = results.get("uri", ("s", ""))[1]
     path = urllib.parse.unquote(urllib.parse.urlparse(uri).path)
-    image = QImage(path)
+    if not path:
+        raise CaptureError("The screenshot portal returned an empty path.")
+    # The portal writes a file just for this request (some desktops into ~/Pictures); we only
+    # need its pixels, so always remove it afterwards, even if the read fails.
+    try:
+        image = QImage(path)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
     if image.isNull():
         raise CaptureError("The screenshot portal returned an unreadable image.")
-    # The portal writes a file just for this request (some desktops into ~/Pictures); we only
-    # needed its pixels, so remove it rather than leave clutter behind.
-    try:
-        os.remove(path)
-    except OSError:
-        pass
     return image

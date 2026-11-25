@@ -15,7 +15,8 @@ if [ -f "$PREFIX/cinnamon-screenshot-binding.bak" ] && command -v gsettings >/de
   gsettings set $schema.media-keys screenshot "$(cat "$PREFIX/cinnamon-screenshot-binding.bak")"
   gsettings reset-recursively "$schema.custom-keybinding:/org/cinnamon/desktop/keybindings/custom-keybindings/dshot/" 2>/dev/null
   list="$(gsettings get $schema custom-list)"
-  list="$(python3 -c 'import ast,sys; v=sys.argv[1].replace("@as ",""); print([x for x in ast.literal_eval(v) if x!="dshot"])' "$list")"
+  # An empty "as" array must be written as "@as []"; a bare "[]" is rejected by gsettings.
+  list="$(python3 -c 'import ast,sys; v=sys.argv[1].replace("@as ",""); r=[x for x in ast.literal_eval(v) if x!="dshot"]; print(r if r else "@as []")' "$list")"
   gsettings set $schema custom-list "$list"
   echo "Restored Cinnamon's Print Screen binding."
 fi

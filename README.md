@@ -18,9 +18,9 @@ The exe is not code-signed, so SmartScreen may warn on first launch: choose **Mo
 ## Features
 
 - Region capture with **Print Screen**, **Ctrl+Alt+S**, a **left click on the tray icon**, or by opening `dshot.exe` again while it runs.
-- Lightshot-style selection: everything outside the region is dimmed.
+- Lightshot-style selection: everything outside the region is dimmed, with a live **W × H** size badge and eight handles to resize it; right-click clears the region (or closes the capture).
 - Icon-only toolbar: rectangle, arrow, pen, text, color, undo, OCR, copy, save, close.
-- Text typed directly over the screenshot in the current color.
+- Text typed directly over the screenshot in the current color (changing the color while typing recolors the text live).
 - Copy the annotated image to the clipboard or save it as PNG.
 - Offline OCR (English and Spanish) with Windows' built-in engine; the text goes straight to the clipboard.
 - Tray icon that adapts to light and dark taskbars, optional start with Windows, single instance.
@@ -39,6 +39,7 @@ Out of scope by design: recording, GIFs, scrolling capture, uploads or share lin
 | **Ctrl+S** | Save as PNG |
 | **Ctrl+Z** | Undo the last annotation |
 | **Esc** | Finish the text being typed; press again to close |
+| **Right-click** | Clear the region; with no region, close the capture |
 
 With the **text** tool, click on the image and type. **Enter** adds a line; click elsewhere or press **Esc** to finish.
 
@@ -103,7 +104,7 @@ cd linux && QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests
 
 ## Status
 
-As of October 2026 (v0.8.0): the Windows build compiles on GitHub's Windows runners and is being tested by hand. The Linux app passes automated tests on every build (capture, copy, OCR in English and Spanish on X11, and the Wayland portal protocol), but has not yet been tried on a real KDE or Cinnamon desktop. Known limits: every monitor is captured on both systems, but a selection stays within one monitor; multi-monitor capture on Windows compiles and is still to be confirmed by hand on a multi-monitor PC; on Linux, mixed per-monitor scaling on Wayland may be slightly off. Windows OCR can fail on protected content or without the language packs.
+As of November 2026 (v0.9.0): the Windows build compiles on GitHub's Windows runners and is being tested by hand. The Linux app passes automated tests on every build (capture, copy, OCR in English and Spanish on X11, and the Wayland portal protocol), but has not yet been tried on a real KDE or Cinnamon desktop. Known limits: every monitor is captured on both systems, but a selection stays within one monitor; multi-monitor capture on Windows compiles and is still to be confirmed by hand on a multi-monitor PC; on Linux, mixed per-monitor scaling on Wayland may be slightly off. Windows OCR can fail on protected content or without the language packs.
 
 ## Third-party code
 

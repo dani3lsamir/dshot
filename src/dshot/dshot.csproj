@@ -9,6 +9,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>dshot</AssemblyName>
     <RootNamespace>dshot</RootNamespace>
+    <Version>0.9.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>dshot.ico</ApplicationIcon>
     <PublishTrimmed>false</PublishTrimmed>

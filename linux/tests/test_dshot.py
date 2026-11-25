@@ -57,6 +57,9 @@ class GeometryTests(unittest.TestCase):
         rects = crop_rects(3000, 1080, [QRect(-1080, 0, 1080, 1080), QRect(0, 0, 1920, 1080)])
         self.assertEqual(rects, [QRect(0, 0, 1080, 1080), QRect(1080, 0, 1920, 1080)])
 
+    def test_crop_rects_empty_geometry_does_not_divide_by_zero(self):
+        self.assertEqual(crop_rects(800, 600, [QRect(0, 0, 0, 0)]), [QRect(0, 0, 800, 600)])
+
     def test_single_screen_portal_image_is_not_copied(self):
         screen = QGuiApplication.primaryScreen()
         full = QImage(screen.geometry().size() * 2, QImage.Format.Format_RGB32)
@@ -147,6 +150,43 @@ class OverlayTests(unittest.TestCase):
         second.copy_image()
         self.assertEqual(QColor(QGuiApplication.clipboard().image().pixel(5, 5)), QColor("#df2d2d"))
         self.assertEqual(session.overlays, [])  # Closing one overlay ends the capture on every monitor.
+
+    def test_right_click_clears_selection_then_closes(self):
+        session = self.make_session()
+        overlay = session.overlays[0]
+        overlay.selection = QRectF(50, 50, 200, 100)
+        overlay.set_tool(Tool.RECTANGLE)
+
+        def rclick():
+            return QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(100, 100), QPointF(100, 100),
+                               Qt.MouseButton.RightButton, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier)
+
+        overlay.mousePressEvent(rclick())  # First right click clears the region.
+        self.assertTrue(overlay.selection.isEmpty())
+        self.assertIs(overlay.tool, Tool.SELECT)
+        overlay.mousePressEvent(rclick())  # With no region, the next one closes the capture.
+        self.assertEqual(session.overlays, [])
+
+    def test_resize_handle_adjusts_selection(self):
+        session = self.make_session()
+        overlay = session.overlays[0]
+        overlay.resize(800, 600)
+        overlay.selection = QRectF(100, 100, 200, 150)
+        overlay.set_tool(Tool.RECTANGLE)
+
+        def mouse(kind, x, y):
+            btns = Qt.MouseButton.LeftButton if kind != QEvent.Type.MouseButtonRelease else Qt.MouseButton.NoButton
+            return QMouseEvent(kind, QPointF(x, y), QPointF(x, y), Qt.MouseButton.LeftButton, btns,
+                               Qt.KeyboardModifier.NoModifier)
+
+        # Grab the SE handle at (300, 250) and drag it to (350, 280).
+        overlay.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, 300, 250))
+        self.assertEqual(overlay._resize_handle, 4)
+        overlay.mouseMoveEvent(mouse(QEvent.Type.MouseMove, 350, 280))
+        overlay.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, 350, 280))
+        self.assertEqual(overlay.selection, QRectF(100, 100, 250, 180))
+        self.assertEqual(overlay._resize_handle, -1)
+        session.close()
 
     def test_drag_repaints_only_around_the_selection(self):
         session = self.make_session()

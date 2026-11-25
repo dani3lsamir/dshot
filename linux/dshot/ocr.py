@@ -4,10 +4,13 @@ import re
 import shutil
 import subprocess
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, QProcess, Qt, Signal
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, QProcess, Qt, QTimer, Signal
 from PySide6.QtGui import QImage
 
 PREFERRED_LANGUAGES = ("eng", "spa")
+OCR_TIMEOUT_MS = 30_000
+
+_cached_langs: str | None = None
 
 
 class OcrError(Exception):
@@ -24,11 +27,16 @@ def installed_languages() -> set[str]:
 
 
 def ocr_languages() -> str:
+    # The installed set does not change while dshot runs, so look it up once and reuse it.
+    global _cached_langs
+    if _cached_langs is not None:
+        return _cached_langs
     langs = [lang for lang in PREFERRED_LANGUAGES if lang in installed_languages()]
     if not langs:
         raise OcrError("No English or Spanish OCR data found. Install tesseract-data-eng/-spa "
                        "(Arch, CachyOS) or tesseract-ocr-eng/-spa (Mint, Ubuntu).")
-    return "+".join(langs)
+    _cached_langs = "+".join(langs)
+    return _cached_langs
 
 
 def prepare(image: QImage) -> bytes:
@@ -59,9 +67,14 @@ class OcrJob(QObject):
     def __init__(self, image: QImage, parent: QObject | None = None):
         super().__init__(parent)
         self._image = image
+        self._cancelled = False
         self._process = QProcess(self)
+        self._process.started.connect(self._on_started)
         self._process.finished.connect(self._on_finished)
         self._process.errorOccurred.connect(self._on_error)
+        self._timeout = QTimer(self)
+        self._timeout.setSingleShot(True)
+        self._timeout.timeout.connect(self._on_timeout)
 
     def start(self) -> None:
         try:
@@ -69,11 +82,34 @@ class OcrJob(QObject):
         except (OcrError, OSError, subprocess.SubprocessError) as exc:
             self.failed.emit(str(exc))
             return
+        self._timeout.start(OCR_TIMEOUT_MS)
         self._process.start("tesseract", ["stdin", "stdout", "-l", langs, "--psm", "3"])
+
+    def cancel(self) -> None:
+        """Stop a running recognition (e.g. the user closed the capture); emits nothing."""
+        self._cancelled = True
+        self._timeout.stop()
+        if self._process.state() != QProcess.ProcessState.NotRunning:
+            self._process.kill()
+            self._process.waitForFinished(500)
+
+    def _on_started(self) -> None:
+        # Feed the image only once the process is up, so stdin is never written to a dead pipe.
+        if self._cancelled:
+            return
         self._process.write(prepare(self._image))
         self._process.closeWriteChannel()
 
+    def _on_timeout(self) -> None:
+        if self._cancelled:
+            return
+        self.cancel()
+        self.failed.emit("Tesseract timed out.")
+
     def _on_finished(self, code: int, _status) -> None:
+        self._timeout.stop()
+        if self._cancelled:
+            return
         if code != 0:
             err = bytes(self._process.readAllStandardError()).decode(errors="replace").strip()
             self.failed.emit(f"Tesseract failed: {err or code}")
@@ -81,5 +117,10 @@ class OcrJob(QObject):
         self.finished.emit(clean(bytes(self._process.readAllStandardOutput()).decode(errors="replace")))
 
     def _on_error(self, error) -> None:
+        self._timeout.stop()
+        if self._cancelled:
+            return
         if error == QProcess.ProcessError.FailedToStart:
             self.failed.emit("Could not start Tesseract.")
+        elif error == QProcess.ProcessError.Crashed:
+            self.failed.emit("Tesseract crashed.")

@@ -99,7 +99,7 @@ Type=Application
 Name=dshot
 GenericName=Screenshot tool
 Comment=Screenshot, annotation and OCR
-Exec=$LAUNCHER
+Exec="$LAUNCHER"
 Icon=dshot
 Terminal=false
 Categories=Utility;Graphics;
@@ -108,7 +108,7 @@ Actions=Capture;
 
 [Desktop Action Capture]
 Name=Capture
-Exec=$LAUNCHER --capture
+Exec="$LAUNCHER" --capture
 EOF
 if command -v update-desktop-database >/dev/null; then update-desktop-database -q "$APPS" 2>/dev/null || true; fi
 if command -v gtk-update-icon-cache >/dev/null; then gtk-update-icon-cache -q -t "$DATA/icons/hicolor" 2>/dev/null || true; fi
